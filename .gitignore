@@ -1,0 +1,6 @@
+logs/
+results/
+*.sh
+__pycache__/
+*.pyc
+scripts/
