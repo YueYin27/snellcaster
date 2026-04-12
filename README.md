@@ -6,16 +6,16 @@
   <a href="https://sites.google.com/view/djcampbell">Dylan Campbell</a>
 </div>
 
+</br>
+
 <p align="center">
-	<a href="https://arxiv.org/abs/2511.17340">
-		<img src="https://img.shields.io/badge/Paper-arXiv-red?logo=arxiv&logoColor=white" style="height: 27px; margin: 5px;">
-	</a>&nbsp
-	<a href="https://huggingface.co/datasets/yinyue27/Snellcaster">
-		<img src="https://img.shields.io/badge/Dataset-HuggingFace-yellow?logo=huggingface&logoColor=white" style="height: 27px; margin: 5px;">
-	</a>&nbsp
-	<a href="https://yueyin27.github.io/snellcaster-page">
-		<img src="https://img.shields.io/badge/Project-Website-blue?logo=google-chrome&logoColor=white" style="height: 27px; margin: 5px;">
-	</a>
+	<a href="https://arxiv.org/abs/2511.17340"><img src="https://img.shields.io/badge/Paper-arXiv-red?logo=arxiv&logoColor=white" style="height: 27px; margin: 5px;"></a>
+	<a href="https://huggingface.co/datasets/yinyue27/Snellcaster"><img src="https://img.shields.io/badge/Dataset-HuggingFace-yellow?logo=huggingface&logoColor=white" style="height: 27px; margin: 5px;"></a>
+	<a href="https://yueyin27.github.io/snellcaster-page"><img src="https://img.shields.io/badge/Project-Website-blue?logo=google-chrome&logoColor=white" style="height: 27px; margin: 5px;"></a>
+</p>
+
+<p align="center" style="color: orange; font-style: italic; margin-bottom: 12px;">
+  ⚠️ This repository is still being updated. The documentation is incomplete.
 </p>
 
 ## ✨ Overview
@@ -52,14 +52,18 @@ pip install -r requirements.txt
 ## 📑 Citation
 
 ```bibtex
-@article{yin2025refracting,
-	title={Refracting Reality: Generating Images with Realistic Transparent Objects},
-	author={Yin, Yue and Tao, Enze and Campbell, Dylan},
-    journal={arXiv preprint arXiv:2511.17340},
-    year={2025}
+@misc{yin2026refractingrealitygeneratingimages,
+      title={Refracting Reality: Generating Images with Realistic Transparent Objects}, 
+      author={Yue Yin and Enze Tao and Dylan Campbell},
+      year={2026},
+      eprint={2511.17340},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2511.17340}, 
+}
 }
 ```
 
 
 ## ⚖️ License
-This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the GNU GENERAL PUBLIC LICENSE Version 3. See the [LICENSE](LICENSE) file for details.
