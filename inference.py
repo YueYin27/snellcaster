@@ -137,11 +137,18 @@ def main() -> None:
 	mesh_bg_path = scene_dir / "mesh.glb"
 	camera_json_path = scene_dir / "camera.json"
 	image_path = scene_dir / "image.jpg"
+
+
+	# Step 4: Text to 3D mesh
+	# TODO: Add TRELLIS inference code for text-to-3D.
+	print("\n[Step 4] Running text-to-3D mesh generation (not implemented yet, will be added soon)...")
 		
 
-	# Step 4: Place out_dir/mesh_fg.glb on MoGe2 mesh and save in the same scene folder.
-	print("\n[Step 4] Placing foreground mesh on MoGe2 mesh...")
-	mesh_fg_input = out_dir / "mesh_fg.glb"
+	# Step 5: Place out_dir/mesh_fg.glb on MoGe2 mesh and save in the same scene folder.
+	print("\n[Step 5] Placing foreground mesh on MoGe2 mesh...")
+	print("Note: The foreground mesh is currently hardcoded to be a sphere. TRELLIS inference for text-to-3D will be added soon.")
+	# TODO: The foreground mesh is currently hardcoded to be a sphere. We will add the code for TRELLIS inference soon.
+	mesh_fg_input = Path("obj_meshes/mesh_sphere.glb")
 	if not mesh_fg_input.exists() and out_dir.name != "results":
 		fallback = script_dir / "results" / "mesh_fg.glb"
 		if fallback.exists():
@@ -176,8 +183,8 @@ def main() -> None:
 		print(f"Placed foreground mesh already exists at {placed_mesh_fg_path}, skipping placement.")
 
 
-	# Step 5: Render foreground mask from the updated mesh_fg.glb.
-	print("\n[Step 5] Rendering foreground mask...")
+	# Step 6: Render foreground mask from the updated mesh_fg.glb.
+	print("\n[Step 6] Rendering foreground mask...")
 	mask_fg_path = scene_dir / "mask_fg.jpg"
 	if not mask_fg_path.exists():
 		run_cmd(
@@ -197,8 +204,8 @@ def main() -> None:
 		print(f"Foreground mask already exists at {mask_fg_path}, skipping mask rendering.")
 
 
-	# Step 6: Run warping.
-	print("\n[Step 6] Running warping...")
+	# Step 7: Run warping.
+	print("\n[Step 7] Running warping...")
 	if not (scene_dir / "warpings").exists():
 		run_cmd(
 			[
@@ -230,8 +237,8 @@ def main() -> None:
 		print(f"Warping output already exists at {scene_dir / 'warpings'}, skipping warping.")
 
 
-	# Step 7: Run dual-view generation.
-	print("\n[Step 7] Running dual-view generation...")
+	# Step 8: Run dual-view generation.
+	print("\n[Step 8] Running dual-view generation...")
 	if not ((scene_dir / "main_no_shadow.jpg").exists() and (scene_dir / "pano.jpg").exists()):
 		run_cmd(
 			[
@@ -272,8 +279,8 @@ def main() -> None:
 		print(f"Dual-view outputs already exist at {scene_dir}, skipping generation.")
 
 	
-	# Step 8: Add shadows
-	print("\n[Step 8] Adding shadows...")
+	# Step 9: Add shadows
+	print("\n[Step 9] Adding shadows...")
 	shadow_output_path = scene_dir / "main.jpg"
 	if not shadow_output_path.exists():
 		pbar = tqdm(total=num_shadow_variations + 1, desc="[Step 8] Adding shadows", unit="step")
