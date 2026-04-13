@@ -4,8 +4,11 @@ import sys
 import os
 from pathlib import Path
 
+from tqdm import tqdm
+
 from generate_base import generate_base_image
 from utils.text_parsing import parse_prompt
+from utils.add_shadows import add_shadows
 
 
 def run_cmd(cmd: list[str], cwd: Path) -> None:
@@ -30,6 +33,7 @@ def main() -> None:
 	parser.add_argument("--main_guidance_scale", type=float, default=3.5, help="Dual-view main guidance scale (default: 3.5)")
 	parser.add_argument("--pano_guidance_scale", type=float, default=3.5, help="Dual-view pano guidance scale (default: 3.5)")
 	parser.add_argument("--pano_seed", type=int, default=42, help="Seed for panorama generation in dual view (default: 42)")
+	parser.add_argument("--num_shadow_variations", type=int, default=3, help="Number of shadow variations to generate (default: 3)")
 	args = parser.parse_args()
 	prompt = args.prompt
 	height = args.height
@@ -45,7 +49,7 @@ def main() -> None:
 	main_guidance_scale = args.main_guidance_scale
 	pano_guidance_scale = args.pano_guidance_scale
 	pano_seed = args.pano_seed
-
+	num_shadow_variations = args.num_shadow_variations
 	script_dir = Path(__file__).resolve().parent
 	out_dir = Path(args.out_dir)
 	if not out_dir.is_absolute():
@@ -54,7 +58,34 @@ def main() -> None:
 
 	# Step 1: Parse prompt into the required prompts.
 	print("\n[Step 1] Prompt parsing...")
-	p, p_obj, p_minus, p_surface, p_pano = parse_prompt(prompt)
+	prompts_file = out_dir / f"{scene_name}_{seed}" / "prompts.txt"
+	if prompts_file.exists():
+		print(f"Loading cached prompts from {prompts_file}")
+		saved = {}
+		for line in prompts_file.read_text().splitlines():
+			if "=" in line:
+				key, val = line.split("=", 1)
+				saved[key.strip()] = val.strip()
+		required_keys = {"p", "p_obj", "p_minus", "p_surface", "p_pano"}
+		if required_keys <= saved.keys():
+			p, p_obj, p_minus, p_surface, p_pano = (
+				saved["p"], saved["p_obj"], saved["p_minus"],
+				saved["p_surface"], saved["p_pano"],
+			)
+		else:
+			missing = required_keys - saved.keys()
+			print(f"Cached prompts missing keys {missing}, re-parsing...")
+			p, p_obj, p_minus, p_surface, p_pano = parse_prompt(prompt)
+			prompts_file.write_text(
+				f"p={p}\np_obj={p_obj}\np_minus={p_minus}\n"
+				f"p_surface={p_surface}\np_pano={p_pano}\n"
+			)
+	else:
+		p, p_obj, p_minus, p_surface, p_pano = parse_prompt(prompt)
+		prompts_file.write_text(
+			f"p={p}\np_obj={p_obj}\np_minus={p_minus}\n"
+			f"p_surface={p_surface}\np_pano={p_pano}\n"
+		)
 	print(f"p: {p}")
 	print(f"p_obj: {p_obj}")
 	print(f"p_minus: {p_minus}")
@@ -80,9 +111,9 @@ def main() -> None:
 
 	# Step 3: Run MoGe2 with maps+glb and threshold=0.1.
 	print("\n[Step 3] Running MoGe2 inference...")
-	scene_dir = out_dir / "moge2" / f"{scene_name}_{seed}"
+	scene_dir = out_dir / f"{scene_name}_{seed}"
 	if not scene_dir.exists():
-		moge2_out_dir = out_dir / "moge2"
+		moge2_out_dir = out_dir
 		run_cmd(
 			[
 				sys.executable,
@@ -100,8 +131,8 @@ def main() -> None:
 			cwd=script_dir,
 		)
 	else:
-		print(f"MoGe2 output already exists at {out_dir / 'moge2'}, skipping inference.")
-		moge2_out_dir = out_dir / "moge2"
+		print(f"MoGe2 output already exists at {out_dir}, skipping inference.")
+		moge2_out_dir = out_dir
 
 	mesh_bg_path = scene_dir / "mesh.glb"
 	camera_json_path = scene_dir / "camera.json"
@@ -201,7 +232,7 @@ def main() -> None:
 
 	# Step 7: Run dual-view generation.
 	print("\n[Step 7] Running dual-view generation...")
-	if not ((scene_dir / "main.jpg").exists() and (scene_dir / "pano.jpg").exists()):
+	if not ((scene_dir / "main_no_shadow.jpg").exists() and (scene_dir / "pano.jpg").exists()):
 		run_cmd(
 			[
 				sys.executable,
@@ -239,6 +270,27 @@ def main() -> None:
 		)
 	else:
 		print(f"Dual-view outputs already exist at {scene_dir}, skipping generation.")
+
+	
+	# Step 8: Add shadows
+	print("\n[Step 8] Adding shadows...")
+	shadow_output_path = scene_dir / "main.jpg"
+	if not shadow_output_path.exists():
+		pbar = tqdm(total=num_shadow_variations + 1, desc="[Step 8] Adding shadows", unit="step")
+		def _shadow_progress(step, total, info):
+			pbar.set_postfix_str(info)
+			pbar.update(1)
+		add_shadows(
+			image_path=str(scene_dir / "main_no_shadow.jpg"),
+			mask_path=str(mask_fg_path),
+			output_path=str(shadow_output_path),
+			obj=p_obj,
+			num_variations=num_shadow_variations,
+			progress_cb=_shadow_progress,
+		)
+		pbar.close()
+	else:
+		print(f"Shadow image already exists at {shadow_output_path}, skipping.")
 
 
 if __name__ == "__main__":
