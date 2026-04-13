@@ -15,7 +15,7 @@
 </p>
 
 <p align="center" style="color: orange; font-style: italic; margin-bottom: 12px;">
-  ⚠️ This repository is still being updated. The documentation is incomplete.
+  ⚠️ This repository is still being updated. Feel free to use it, but keep it up to date.
 </p>
 
 ## ✨ Overview
@@ -39,15 +39,11 @@ pip install -r requirements.txt
 ```
 
 ### 🤖 Inference
-1. Inference (with pre-processing):
    ```bash
+   # Example prompt and inference script
    prompt="A beautiful landscape with a river and mountains, viewed from a camera positioned directly in front of a stone table and chairs in the immediate foreground, a solid transparent glass sphere on the table."
    python inference.py "$prompt" --scene_name "landscape"
    ```
-2. Add shadows (post-processing):
-	```bash
-	python utils/add_shadows.py --image_name main_image.jpg --output_dir results/
-	```
 
 ## 📑 Citation
 
