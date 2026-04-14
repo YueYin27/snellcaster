@@ -19,7 +19,7 @@
 </p>
 
 ## ✨ Overview
-Refracting Reality (<span style="color:#fae46b; font-weight:bold;">CVPR 2026 Highlight</span>) introduces Snellcaster, a generation framework for synthesizing images with transparent objects that obey physically grounded optics. Given a text prompt, Snellcaster synchronizes pixels within the object’s boundary with those outside by warping and merging the pixels using Snell’s Law of Refraction at each step of the generation trajectory. For surfaces that are not directly observed in the image but are visible via refraction or reflection, we recover their appearance by synchronizing the image with a second generated view—a panorama centered at the object—using the same warping and merging procedure.
+Refracting Reality (CVPR 2026 Highlight) introduces Snellcaster, a generation framework for synthesizing images with transparent objects that obey physically grounded optics. Given a text prompt, Snellcaster synchronizes pixels within the object’s boundary with those outside by warping and merging the pixels using Snell’s Law of Refraction at each step of the generation trajectory. For surfaces that are not directly observed in the image but are visible via refraction or reflection, we recover their appearance by synchronizing the image with a second generated view — a panorama centered at the object — using the same warping and merging procedure.
 
 
 ## 🚀 Quickstart
