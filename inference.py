@@ -34,6 +34,7 @@ def main() -> None:
 	parser.add_argument("--pano_guidance_scale", type=float, default=3.5, help="Dual-view pano guidance scale (default: 3.5)")
 	parser.add_argument("--pano_seed", type=int, default=42, help="Seed for panorama generation in dual view (default: 42)")
 	parser.add_argument("--num_shadow_variations", type=int, default=3, help="Number of shadow variations to generate (default: 3)")
+	parser.add_argument("--obj_mesh", type=str, default=None, help="Path to an existing foreground object mesh (.glb). If provided, skips step 4 (text-to-3D generation) and uses this mesh directly.")
 	args = parser.parse_args()
 	prompt = args.prompt
 	height = args.height
@@ -50,6 +51,7 @@ def main() -> None:
 	pano_guidance_scale = args.pano_guidance_scale
 	pano_seed = args.pano_seed
 	num_shadow_variations = args.num_shadow_variations
+	mesh_fg_path = Path(args.obj_mesh) if args.obj_mesh is not None else None
 	script_dir = Path(__file__).resolve().parent
 	out_dir = Path(args.out_dir)
 	if not out_dir.is_absolute():
@@ -140,26 +142,18 @@ def main() -> None:
 
 
 	# Step 4: Text to 3D mesh
-	# TODO: Add TRELLIS inference code for text-to-3D.
-	print("\n[Step 4] Running text-to-3D mesh generation (not implemented yet, will be added soon)...")
-		
+	if mesh_fg_path is None:
+		print("\n[Step 4] Running text-to-3D mesh generation...")
+		# TODO: Add TRELLIS inference code for text-to-3D. For now, fall back to the placeholder sphere mesh.
+		mesh_fg_path = script_dir / "obj_meshes" / "mesh_sphere.glb"
+		print(f"Note: Text-to-3D is not implemented yet (coming soon). Using placeholder mesh: {mesh_fg_path}")
+	else:
+		print(f"\n[Step 4] Skipping text-to-3D generation, using provided mesh: {mesh_fg_path}")
+		if not mesh_fg_path.exists():
+			raise FileNotFoundError(f"Provided foreground mesh not found: {mesh_fg_path}")
 
-	# Step 5: Place out_dir/mesh_fg.glb on MoGe2 mesh and save in the same scene folder.
+	# Step 5: Place mesh_fg on MoGe2 mesh and save in the same scene folder.
 	print("\n[Step 5] Placing foreground mesh on MoGe2 mesh...")
-	print("Note: The foreground mesh is currently hardcoded to be a sphere. TRELLIS inference for text-to-3D will be added soon.")
-	# TODO: The foreground mesh is currently hardcoded to be a sphere. We will add the code for TRELLIS inference soon.
-	mesh_fg_input = Path("obj_meshes/mesh_sphere.glb")
-	if not mesh_fg_input.exists() and out_dir.name != "results":
-		fallback = script_dir / "results" / "mesh_fg.glb"
-		if fallback.exists():
-			mesh_fg_input = fallback
-
-	if not mesh_fg_input.exists():
-		raise FileNotFoundError(
-			f"Foreground mesh not found. Expected at: {out_dir / 'mesh_fg.glb'} "
-			f"(or fallback: {script_dir / 'results' / 'mesh_fg.glb'})"
-		)
-	
 	placed_mesh_fg_path = scene_dir / "mesh_fg.glb"
 	if not placed_mesh_fg_path.exists():
 		run_cmd(
@@ -167,7 +161,7 @@ def main() -> None:
 				sys.executable,
 				"utils/obj_placement.py",
 				str(mesh_bg_path),
-				str(mesh_fg_input),
+				str(mesh_fg_path),
 				str(placed_mesh_fg_path),
 				"--camera",
 				str(camera_json_path),
