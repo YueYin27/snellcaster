@@ -230,12 +230,18 @@ def main() -> None:
 			cwd=script_dir,
 		)
 
-
-	warpings_dir = intermediates_dir / "warpings"
-
+	
 	# Step 7: Run warping.
 	print("\n[Step 7] Running warping...")
-	if not warpings_dir.exists():
+	warpings_dir = intermediates_dir / "warpings"
+	expected_warping_files = [warpings_dir / f"self_uv_map.npz",
+						   warpings_dir / f"pano_to_main_uv.npz",
+						   warpings_dir / f"pano_to_main_uv_reflection.npz",
+						   warpings_dir / f"main_to_pano_uv_without_fg.npz",
+						   warpings_dir / f"main_to_pano_uv_with_fg.npz",
+						   warpings_dir / f"fresnel_reflection_ratio.png"]
+	warping_outputs_exist = all(f.exists() for f in expected_warping_files)
+	if not warping_outputs_exist:
 		run_cmd(
 			[
 				sys.executable,
@@ -263,7 +269,7 @@ def main() -> None:
 			cwd=script_dir,
 		)
 	else:
-		print(f"Warping output already exists at {warpings_dir}, skipping warping.")
+		print(f"Warping outputs already exist at {warpings_dir}, skipping warping.")
 
 
 	main_path = scene_dir / "main.jpg"
