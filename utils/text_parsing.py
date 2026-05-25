@@ -66,12 +66,16 @@ def parse_prompt(prompt: str, model_id: str = "google/gemma-4-E2B-it", seed: int
         f"Rewrite this scene description as a single equirectangular 360-degree panorama prompt captured from the exact position of the transparent object in the original scene: {p}. Remove the transparent object entirely and describe the support surface as clean and empty. Keep the same room, furniture, lighting, style, and realism as the original scene, but describe a full spherical environment view consistent with a panorama. Output exactly one concise prompt and nothing else.",
         )
 
+    p_ior = generate_text(
+        f"Given this scene description: \"{p}\", identify the transparent material that the object is made of (e.g., glass, water, ice, diamond, acrylic, quartz) and output ONLY its index of refraction (IoR) at visible wavelengths as a single decimal number (e.g., 1.5 for glass, 1.33 for water, 1.31 for ice, 2.42 for diamond, 1.49 for acrylic, 1.54 for quartz). If the material is not explicitly stated, infer the most likely transparent material from the context and output its typical IoR. Output exactly one decimal number and nothing else.",
+    )
+
     del model, processor
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    return p, p_obj, p_minus, p_surface, p_pano
+    return p, p_obj, p_minus, p_surface, p_pano, p_ior
 
 
 def main():
@@ -82,13 +86,14 @@ def main():
     parser.add_argument("--out", default=None, help="Optional path to write KV-formatted prompts.txt")
     args = parser.parse_args()
 
-    p, p_obj, p_minus, p_surface, p_pano = parse_prompt(args.prompt, model_id=args.model_id, seed=args.seed)
+    p, p_obj, p_minus, p_surface, p_pano, p_ior = parse_prompt(args.prompt, model_id=args.model_id, seed=args.seed)
 
     print(f"p: {p}")
     print(f"p_obj: {p_obj}")
     print(f"p_minus: {p_minus}")
     print(f"p_surface: {p_surface}")
     print(f"p_pano: {p_pano}")
+    print(f"p_ior: {p_ior}")
 
     if args.out is not None:
         from pathlib import Path
@@ -96,7 +101,7 @@ def main():
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(
             f"p={p}\np_obj={p_obj}\np_minus={p_minus}\n"
-            f"p_surface={p_surface}\np_pano={p_pano}\n"
+            f"p_surface={p_surface}\np_pano={p_pano}\np_ior={p_ior}\n"
         )
 
 

@@ -69,7 +69,7 @@ def main() -> None:
 	# Step 1: Parse prompt into the required prompts.
 	print("\n[Step 1] Prompt parsing...")
 	prompts_file = intermediates_dir / "prompts.txt"
-	required_keys = {"p", "p_obj", "p_minus", "p_surface", "p_pano"}
+	required_keys = {"p", "p_obj", "p_minus", "p_surface", "p_pano", "p_ior"}
 
 	def _load_prompts(path: Path) -> dict:
 		saved = {}
@@ -98,15 +98,16 @@ def main() -> None:
 	else:
 		print(f"Loading cached prompts from {prompts_file}")
 
-	p, p_obj, p_minus, p_surface, p_pano = (
+	p, p_obj, p_minus, p_surface, p_pano, p_ior = (
 		saved["p"], saved["p_obj"], saved["p_minus"],
-		saved["p_surface"], saved["p_pano"],
+		saved["p_surface"], saved["p_pano"], saved["p_ior"],
 	)
 	print(f"p: {p}")
 	print(f"p_obj: {p_obj}")
 	print(f"p_minus: {p_minus}")
 	print(f"p_surface: {p_surface}")
 	print(f"p_pano: {p_pano}")
+	print(f"p_ior: {p_ior}")
 
 
 	# Step 2: Generate base image from p_minus.
@@ -257,7 +258,7 @@ def main() -> None:
 				"--pano_h",
 				"1024",
 				"--ior",
-				"1.5",
+				str(p_ior),
 			],
 			cwd=script_dir,
 		)
