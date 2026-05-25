@@ -1,8 +1,26 @@
-from transformers import AutoProcessor, AutoModelForCausalLM
+from transformers import AutoProcessor, AutoModelForCausalLM, set_seed
 import argparse
+import gc
+import os
+import random
+
+import numpy as np
+import torch
 
 
-def parse_prompt(prompt: str, model_id: str = "google/gemma-4-E2B-it"):
+def parse_prompt(prompt: str, model_id: str = "google/gemma-4-E2B-it", seed: int = 0):
+    # Make every source of nondeterminism reproducible.
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    set_seed(seed)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     processor = AutoProcessor.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(model_id, dtype="auto", device_map="auto")
 
@@ -21,7 +39,14 @@ def parse_prompt(prompt: str, model_id: str = "google/gemma-4-E2B-it"):
         inputs = processor(text=text, return_tensors="pt").to(model.device)
         input_len = inputs["input_ids"].shape[-1]
 
-        outputs = model.generate(**inputs, max_new_tokens=max_new_tokens)
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            num_beams=1,
+            temperature=1.0,
+            top_p=1.0,
+        )
         response = processor.decode(outputs[0][input_len:], skip_special_tokens=True)
         return response.strip()
 
@@ -41,6 +66,11 @@ def parse_prompt(prompt: str, model_id: str = "google/gemma-4-E2B-it"):
         f"Rewrite this scene description as a single equirectangular 360-degree panorama prompt captured from the exact position of the transparent object in the original scene: {p}. Remove the transparent object entirely and describe the support surface as clean and empty. Keep the same room, furniture, lighting, style, and realism as the original scene, but describe a full spherical environment view consistent with a panorama. Output exactly one concise prompt and nothing else.",
         )
 
+    del model, processor
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     return p, p_obj, p_minus, p_surface, p_pano
 
 
@@ -48,15 +78,26 @@ def main():
     parser = argparse.ArgumentParser(description="Extract object noun and rewrite scene using Gemma model")
     parser.add_argument("prompt", help="Scene description prompt")
     parser.add_argument("--model_id", default="google/gemma-4-E2B-it", help="Model ID to load")
+    parser.add_argument("--seed", type=int, default=42, help="Seed for reproducible generation")
+    parser.add_argument("--out", default=None, help="Optional path to write KV-formatted prompts.txt")
     args = parser.parse_args()
 
-    p, p_obj, p_minus, p_surface, p_pano = parse_prompt(args.prompt, model_id=args.model_id)
+    p, p_obj, p_minus, p_surface, p_pano = parse_prompt(args.prompt, model_id=args.model_id, seed=args.seed)
 
     print(f"p: {p}")
     print(f"p_obj: {p_obj}")
     print(f"p_minus: {p_minus}")
     print(f"p_surface: {p_surface}")
     print(f"p_pano: {p_pano}")
+
+    if args.out is not None:
+        from pathlib import Path
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            f"p={p}\np_obj={p_obj}\np_minus={p_minus}\n"
+            f"p_surface={p_surface}\np_pano={p_pano}\n"
+        )
 
 
 if __name__ == "__main__":
