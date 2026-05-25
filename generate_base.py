@@ -1,6 +1,7 @@
 from diffusers import FluxPipeline
 import torch
 import argparse
+import gc
 import os
 import re
 import random
@@ -32,6 +33,10 @@ def generate_base_image(prompt: str, model_id: str = "black-forest-labs/FLUX.1-d
         out_path = os.path.join(save_path, "base_image.jpg")
     image.save(out_path)
     print(f"Saved base image to {out_path} with seed {seed}")
+
+    del outputs, pipe
+    gc.collect()
+    torch.cuda.empty_cache()
 
     return image, seed
 

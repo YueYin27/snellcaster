@@ -1,13 +1,15 @@
 import argparse
+import gc
+import shutil
 import subprocess
 import sys
 import os
 from pathlib import Path
 
+import torch
+
 from tqdm import tqdm
 
-from generate_base import generate_base_image
-from utils.text_parsing import parse_prompt
 from utils.add_shadows import add_shadows
 
 
@@ -59,36 +61,47 @@ def main() -> None:
 		out_dir = (script_dir / out_dir).resolve()
 	out_dir.mkdir(parents=True, exist_ok=True)
 
+	scene_dir = out_dir / f"{scene_name}_{seed}"
+	intermediates_dir = scene_dir / "intermediates"
+	scene_dir.mkdir(parents=True, exist_ok=True)
+	intermediates_dir.mkdir(parents=True, exist_ok=True)
+
 	# Step 1: Parse prompt into the required prompts.
 	print("\n[Step 1] Prompt parsing...")
-	prompts_file = out_dir / f"{scene_name}_{seed}" / "prompts.txt"
-	if prompts_file.exists():
-		print(f"Loading cached prompts from {prompts_file}")
+	prompts_file = intermediates_dir / "prompts.txt"
+	required_keys = {"p", "p_obj", "p_minus", "p_surface", "p_pano"}
+
+	def _load_prompts(path: Path) -> dict:
 		saved = {}
-		for line in prompts_file.read_text().splitlines():
+		for line in path.read_text().splitlines():
 			if "=" in line:
 				key, val = line.split("=", 1)
 				saved[key.strip()] = val.strip()
-		required_keys = {"p", "p_obj", "p_minus", "p_surface", "p_pano"}
-		if required_keys <= saved.keys():
-			p, p_obj, p_minus, p_surface, p_pano = (
-				saved["p"], saved["p_obj"], saved["p_minus"],
-				saved["p_surface"], saved["p_pano"],
-			)
-		else:
-			missing = required_keys - saved.keys()
-			print(f"Cached prompts missing keys {missing}, re-parsing...")
-			p, p_obj, p_minus, p_surface, p_pano = parse_prompt(prompt)
-			prompts_file.write_text(
-				f"p={p}\np_obj={p_obj}\np_minus={p_minus}\n"
-				f"p_surface={p_surface}\np_pano={p_pano}\n"
-			)
-	else:
-		p, p_obj, p_minus, p_surface, p_pano = parse_prompt(prompt)
-		prompts_file.write_text(
-			f"p={p}\np_obj={p_obj}\np_minus={p_minus}\n"
-			f"p_surface={p_surface}\np_pano={p_pano}\n"
+		return saved
+
+	saved = _load_prompts(prompts_file) if prompts_file.exists() else {}
+	if not (required_keys <= saved.keys()):
+		if saved:
+			print(f"Cached prompts missing keys {required_keys - saved.keys()}, re-parsing...")
+		run_cmd(
+			[
+				sys.executable,
+				"-m",
+				"utils.text_parsing",
+				prompt,
+				"--seed", str(seed),
+				"--out", str(prompts_file),
+			],
+			cwd=script_dir,
 		)
+		saved = _load_prompts(prompts_file)
+	else:
+		print(f"Loading cached prompts from {prompts_file}")
+
+	p, p_obj, p_minus, p_surface, p_pano = (
+		saved["p"], saved["p_obj"], saved["p_minus"],
+		saved["p_surface"], saved["p_pano"],
+	)
 	print(f"p: {p}")
 	print(f"p_obj: {p_obj}")
 	print(f"p_minus: {p_minus}")
@@ -97,35 +110,41 @@ def main() -> None:
 
 
 	# Step 2: Generate base image from p_minus.
-	if not (out_dir / f"{scene_name}_{seed}.jpg").exists():
+	image_path = scene_dir / "base_image.jpg"
+	if not image_path.exists():
 		print("\n[Step 2] Generating base image with FluxPipeline...")
-		image_path = out_dir / f"{scene_name}_{seed}.jpg"
-		base_img, seed = generate_base_image(
-			p_minus,
-			width=width,
-			height=height,
-			seed=seed,
-			save_path=str(image_path),
+		run_cmd(
+			[
+				sys.executable,
+				"generate_base.py",
+				p_minus,
+				"--width", str(width),
+				"--height", str(height),
+				"--seed", str(seed),
+				"--save_path", str(image_path),
+			],
+			cwd=script_dir,
 		)
 	else:
-		print(f"Base image already exists at {out_dir / f'{scene_name}_{seed}.jpg'}, skipping generation.")
-		image_path = out_dir / f"{scene_name}_{seed}.jpg"
+		print(f"Base image already exists at {image_path}, skipping generation.")
 
 
 	# Step 3: Run MoGe2 with maps+glb and threshold=0.1.
 	print("\n[Step 3] Running MoGe2 inference...")
-	scene_dir = out_dir / f"{scene_name}_{seed}"
-	if not scene_dir.exists():
-		moge2_out_dir = out_dir
+	mesh_bg_path = intermediates_dir / "mesh.glb"
+	camera_json_path = intermediates_dir / "camera.json"
+	if not mesh_bg_path.exists() or not camera_json_path.exists():
+		# moge2 writes to <-o>/<image_stem>/, so point it at intermediates_dir
+		# and then flatten the resulting "base_image/" subfolder up one level.
 		run_cmd(
 			[
 				sys.executable,
 				"-m",
 				"utils.moge2_infer",
 				"-i",
-				str(base_image_path),
+				str(image_path),
 				"-o",
-				str(moge2_out_dir),
+				str(intermediates_dir),
 				"--maps",
 				"--glb",
 				"--threshold",
@@ -133,12 +152,19 @@ def main() -> None:
 			],
 			cwd=script_dir,
 		)
+		moge2_subdir = intermediates_dir / image_path.stem
+		if moge2_subdir.exists():
+			for child in moge2_subdir.iterdir():
+				target = intermediates_dir / child.name
+				if target.exists():
+					if target.is_dir():
+						shutil.rmtree(target)
+					else:
+						target.unlink()
+				shutil.move(str(child), str(target))
+			moge2_subdir.rmdir()
 	else:
-		print(f"MoGe2 output already exists at {out_dir}, skipping inference.")
-		moge2_out_dir = out_dir
-
-	mesh_bg_path = scene_dir / "mesh.glb"
-	camera_json_path = scene_dir / "camera.json"
+		print(f"MoGe2 output already exists at {intermediates_dir}, skipping inference.")
 
 
 	# Step 4: Text to 3D mesh
@@ -154,7 +180,7 @@ def main() -> None:
 
 	# Step 5: Place mesh_fg on MoGe2 mesh and save in the same scene folder.
 	print("\n[Step 5] Placing foreground mesh on MoGe2 mesh...")
-	placed_mesh_fg_path = scene_dir / "mesh_fg.glb"
+	placed_mesh_fg_path = intermediates_dir / "mesh_fg.glb"
 	if not placed_mesh_fg_path.exists():
 		run_cmd(
 			[
@@ -179,8 +205,8 @@ def main() -> None:
 
 	# Step 6: Render foreground mask from the updated mesh_fg.glb.
 	print("\n[Step 6] Rendering foreground mask...")
-	mask_fg_jpg = scene_dir / "mask_fg.jpg"
-	mask_fg_png = scene_dir / "mask_fg.png"
+	mask_fg_jpg = intermediates_dir / "mask_fg.jpg"
+	mask_fg_png = intermediates_dir / "mask_fg.png"
 	if mask_fg_jpg.exists():
 		mask_fg_path = mask_fg_jpg
 		print(f"Foreground mask already exists at {mask_fg_path}, skipping mask rendering.")
@@ -204,9 +230,11 @@ def main() -> None:
 		)
 
 
+	warpings_dir = intermediates_dir / "warpings"
+
 	# Step 7: Run warping.
 	print("\n[Step 7] Running warping...")
-	if not (scene_dir / "warpings").exists():
+	if not warpings_dir.exists():
 		run_cmd(
 			[
 				sys.executable,
@@ -223,7 +251,7 @@ def main() -> None:
 				"--fg_mask",
 				str(mask_fg_path),
 				"--output_dir",
-				str(scene_dir / "warpings"),
+				str(warpings_dir),
 				"--pano_w",
 				"2048",
 				"--pano_h",
@@ -234,12 +262,21 @@ def main() -> None:
 			cwd=script_dir,
 		)
 	else:
-		print(f"Warping output already exists at {scene_dir / 'warpings'}, skipping warping.")
+		print(f"Warping output already exists at {warpings_dir}, skipping warping.")
 
+
+	main_path = scene_dir / "main.jpg"
+	pano_path = scene_dir / "pano.jpg"
 
 	# Step 8: Run dual-view generation.
 	print("\n[Step 8] Running dual-view generation...")
-	if not ((scene_dir / "main_no_shadow.jpg").exists() and (scene_dir / "pano.jpg").exists()):
+	if not (main_path.exists() and pano_path.exists()):
+		# Ensure no stray GPU allocations from earlier in-process steps survive
+		# into the dual-view subprocess (device_map="balanced" reads free VRAM
+		# at load time and silently offloads layers to CPU if it sees too little).
+		gc.collect()
+		if torch.cuda.is_available():
+			torch.cuda.empty_cache()
 		dual_view_cmd = [
 			sys.executable,
 			"generate_dual_view.py",
@@ -252,9 +289,9 @@ def main() -> None:
 			"--fg_mask_path",
 			str(mask_fg_path),
 			"--warpings_dir",
-			str(scene_dir / "warpings"),
+			str(warpings_dir),
 			"--output_dir",
-			str(scene_dir),
+			str(intermediates_dir),
 			"--alpha",
 			str(alpha),
 			"--levels",
@@ -275,20 +312,23 @@ def main() -> None:
 		if args.save_intermediate:
 			dual_view_cmd.append("--save_intermediate")
 		run_cmd(dual_view_cmd, cwd=script_dir)
+		# Promote final outputs from intermediates up to scene_dir
+		shutil.move(str(intermediates_dir / "main.jpg"), str(main_path))
+		shutil.move(str(intermediates_dir / "pano.jpg"), str(pano_path))
 	else:
 		print(f"Dual-view outputs already exist at {scene_dir}, skipping generation.")
 
 	
 	# Step 9: Add shadows
 	print("\n[Step 9] Adding shadows...")
-	shadow_output_path = scene_dir / "main.jpg"
+	shadow_output_path = scene_dir / "main_with_shadows.jpg"
 	if not shadow_output_path.exists():
-		pbar = tqdm(total=num_shadow_variations + 1, desc="[Step 8] Adding shadows", unit="step")
+		pbar = tqdm(total=num_shadow_variations + 1, desc="[Step 9] Adding shadows", unit="step")
 		def _shadow_progress(step, total, info):
 			pbar.set_postfix_str(info)
 			pbar.update(1)
 		add_shadows(
-			image_path=str(scene_dir / "main_no_shadow.jpg"),
+			image_path=str(main_path),
 			mask_path=str(mask_fg_path),
 			output_path=str(shadow_output_path),
 			obj=p_obj,
