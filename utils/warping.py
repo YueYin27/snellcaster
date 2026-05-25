@@ -709,17 +709,22 @@ def generate_pano_to_main_uv_map(
             if ok.any():
                 valid[pano_idx_ray[ok]] = True
 
-        for idx_hit in range(num_hits):
-            if not nonzero[idx_hit]:
-                continue
-            if not valid[idx_hit]:
-                continue
-            u, v = direction_to_uv(dirs_normalized[idx_hit], pano_w, pano_h)
-            if 0 <= u < pano_w and 0 <= v < pano_h:
-                y = int(pixel_ys[idx_hit])
-                x = int(pixel_xs[idx_hit])
-                uv_map[y, x, 0] = float(u)
-                uv_map[y, x, 1] = float(v)
+        keep = nonzero & valid
+        if keep.any():
+            dirs_keep = torch.from_numpy(dirs_normalized[keep].astype(np.float32)).to(device)
+            ys_keep = torch.from_numpy(pixel_ys[keep].astype(np.int64)).to(device)
+            xs_keep = torch.from_numpy(pixel_xs[keep].astype(np.int64)).to(device)
+            dx, dy, dz = dirs_keep[:, 0], dirs_keep[:, 1], dirs_keep[:, 2]
+            phi = torch.atan2(dx, dy)
+            lam = torch.asin(torch.clamp(dz, -1.0, 1.0))
+            u_t = ((phi + math.pi) / (2.0 * math.pi)) * float(pano_w)
+            v_t = ((math.pi / 2.0 - lam) / math.pi) * float(pano_h)
+            u_t = torch.remainder(u_t, float(pano_w))
+            v_t = torch.clamp(v_t, 0.0, float(pano_h - 1))
+            in_bounds = (u_t >= 0) & (u_t < pano_w) & (v_t >= 0) & (v_t < pano_h)
+            if bool(in_bounds.any()):
+                uv_map[ys_keep[in_bounds], xs_keep[in_bounds], 0] = u_t[in_bounds]
+                uv_map[ys_keep[in_bounds], xs_keep[in_bounds], 1] = v_t[in_bounds]
 
     # Save UV map
     uv_np = uv_map.detach().cpu().numpy().astype(np.float32)
@@ -730,31 +735,35 @@ def generate_pano_to_main_uv_map(
     print("\nGenerating reflection UV map...")
     uv_map_reflection = torch.full((main_height, main_width, 2), -1.0, dtype=torch.float32, device=device)
     
-    # Process reflection directions to create UV map
+    # Process reflection directions to create UV map (vectorized on GPU)
     # reflection_dirs maps ray_idx -> reflection direction (3D vector)
     num_reflections = 0
-    for ray_idx, reflection_dir in reflection_dirs.items():
-        # Get pixel coordinates from ray index
-        y = int(ray_idx // main_width)
-        x = int(ray_idx % main_width)
-        
-        # Skip if out of bounds
-        if y >= main_height or x >= main_width:
-            continue
-        
-        # Normalize reflection direction
-        reflection_dir_norm = reflection_dir / (np.linalg.norm(reflection_dir) + 1e-8)
-        
-        # Convert reflection direction to panorama UV coordinates
-        # The reflection direction is from the main camera position, looking in the reflected direction
-        u, v = direction_to_uv(reflection_dir_norm, pano_w, pano_h)
-        
-        # Check if UV is valid
-        if 0 <= u < pano_w and 0 <= v < pano_h:
-            uv_map_reflection[y, x, 0] = float(u)
-            uv_map_reflection[y, x, 1] = float(v)
-            num_reflections += 1
-    
+    if len(reflection_dirs) > 0:
+        ray_idx_np = np.fromiter(reflection_dirs.keys(), dtype=np.int64, count=len(reflection_dirs))
+        refl_np = np.stack(list(reflection_dirs.values()), axis=0).astype(np.float32)
+
+        ys_np = ray_idx_np // main_width
+        xs_np = ray_idx_np % main_width
+        in_img = (ys_np < main_height) & (xs_np < main_width)
+        if in_img.any():
+            refl_t = torch.from_numpy(refl_np[in_img]).to(device)
+            ys_t = torch.from_numpy(ys_np[in_img].astype(np.int64)).to(device)
+            xs_t = torch.from_numpy(xs_np[in_img].astype(np.int64)).to(device)
+            norms_t = torch.linalg.norm(refl_t, dim=1, keepdim=True) + 1e-8
+            refl_t = refl_t / norms_t
+            dx, dy, dz = refl_t[:, 0], refl_t[:, 1], refl_t[:, 2]
+            phi = torch.atan2(dx, dy)
+            lam = torch.asin(torch.clamp(dz, -1.0, 1.0))
+            u_t = ((phi + math.pi) / (2.0 * math.pi)) * float(pano_w)
+            v_t = ((math.pi / 2.0 - lam) / math.pi) * float(pano_h)
+            u_t = torch.remainder(u_t, float(pano_w))
+            v_t = torch.clamp(v_t, 0.0, float(pano_h - 1))
+            in_bounds = (u_t >= 0) & (u_t < pano_w) & (v_t >= 0) & (v_t < pano_h)
+            if bool(in_bounds.any()):
+                uv_map_reflection[ys_t[in_bounds], xs_t[in_bounds], 0] = u_t[in_bounds]
+                uv_map_reflection[ys_t[in_bounds], xs_t[in_bounds], 1] = v_t[in_bounds]
+                num_reflections = int(in_bounds.sum().item())
+
     print(f"Generated {num_reflections} reflection UV mappings")
     
     # Save reflection UV map
@@ -768,11 +777,13 @@ def generate_pano_to_main_uv_map(
     
     # Save Fresnel coefficients as grayscale image (0-1 range)
     fresnel_map = np.zeros((main_height, main_width), dtype=np.float32)
-    for ray_idx, R in fresnel_Rs.items():
-        y = int(ray_idx // main_width)
-        x = int(ray_idx % main_width)
-        if y < main_height and x < main_width:
-            fresnel_map[y, x] = R
+    if len(fresnel_Rs) > 0:
+        f_idx = np.fromiter(fresnel_Rs.keys(), dtype=np.int64, count=len(fresnel_Rs))
+        f_val = np.fromiter(fresnel_Rs.values(), dtype=np.float32, count=len(fresnel_Rs))
+        f_y = f_idx // main_width
+        f_x = f_idx % main_width
+        in_img = (f_y < main_height) & (f_x < main_width)
+        fresnel_map[f_y[in_img], f_x[in_img]] = f_val[in_img]
     
     # Convert to uint8 grayscale image (0-255 range)
     fresnel_image = (np.clip(fresnel_map, 0.0, 1.0) * 255.0).astype(np.uint8)
@@ -987,19 +998,23 @@ def generate_uv_map(
     main_img = (main_img / 255.0) * 2.0 - 1.0
     
     # Build a synthetic panorama preview image: smooth gradient from top-left to bottom-right.
-    x_grad = np.linspace(0.0, 1.0, pano_w, dtype=np.float32)
-    y_grad = np.linspace(0.0, 1.0, pano_h, dtype=np.float32)
-    xx, yy = np.meshgrid(x_grad, y_grad)
-    grad = (xx + yy) * 0.5
-    pano_preview_np = np.stack([xx, yy, grad], axis=-1)
-    pano_preview_u8 = (np.clip(pano_preview_np, 0.0, 1.0) * 255.0).astype(np.uint8)
     pano_preview_path = os.path.join(output_dir, "panorama_preview.png")
-    Image.fromarray(pano_preview_u8).save(pano_preview_path)
+    if os.path.exists(pano_preview_path):
+        pano_preview_u8 = np.array(Image.open(pano_preview_path).convert('RGB'))
+        print(f"✓ Loaded cached pano preview image: {pano_preview_path}")
+    else:
+        x_grad = np.linspace(0.0, 1.0, pano_w, dtype=np.float32)
+        y_grad = np.linspace(0.0, 1.0, pano_h, dtype=np.float32)
+        xx, yy = np.meshgrid(x_grad, y_grad)
+        grad = (xx + yy) * 0.5
+        pano_preview_np = np.stack([xx, yy, grad], axis=-1)
+        pano_preview_u8 = (np.clip(pano_preview_np, 0.0, 1.0) * 255.0).astype(np.uint8)
+        Image.fromarray(pano_preview_u8).save(pano_preview_path)
+        print(f"✓ Generated pano preview image: {pano_w}x{pano_h} -> {pano_preview_path}")
     pano_img = torch.from_numpy(pano_preview_u8.astype(np.float32)).permute(2, 0, 1)
     # Normalize to [-1, 1] range
     pano_img = (pano_img / 255.0) * 2.0 - 1.0
     print(f"✓ Loaded main image: {main_w}x{main_h}")
-    print(f"✓ Generated pano preview image: {pano_w}x{pano_h} -> {pano_preview_path}")
     
     try:
         # 1. Generate self UV map

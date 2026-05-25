@@ -224,8 +224,36 @@ def _get_or_create_bvh(mesh: trimesh.Trimesh):
     return cache
 
 
+def _batch_ray_aabb_any(origins: np.ndarray, inv_dirs: np.ndarray,
+                        bbox_min: np.ndarray, bbox_max: np.ndarray) -> np.ndarray:
+    """Vectorized slab test: is each (node) hit by ANY of the rays?
+
+    origins, inv_dirs: [R, 3]
+    bbox_min, bbox_max: [N, 3]
+    returns: bool array of shape [N], True where any ray intersects that node's AABB.
+    """
+    if origins.size == 0 or bbox_min.shape[0] == 0:
+        return np.zeros((bbox_min.shape[0],), dtype=bool)
+
+    # Broadcast to [R, N, 3]
+    o = origins[:, None, :]
+    inv = inv_dirs[:, None, :]
+    bmin = bbox_min[None, :, :]
+    bmax = bbox_max[None, :, :]
+    t1 = (bmin - o) * inv
+    t2 = (bmax - o) * inv
+    tmin = np.minimum(t1, t2).max(axis=2)
+    tmax = np.maximum(t1, t2).min(axis=2)
+    hit = (tmax >= np.maximum(tmin, 0.0))  # [R, N]
+    return hit.any(axis=0)  # [N]
+
+
 def _collect_bvh_candidate_triangles(bvh, origins: np.ndarray, directions: np.ndarray) -> np.ndarray:
-    """Return sorted unique triangle indices whose BVH nodes intersect any ray in the batch."""
+    """Return sorted unique triangle indices whose BVH nodes intersect any ray in the batch.
+
+    Vectorized BFS down the BVH: at each level, test all active nodes against all rays
+    in one broadcasted slab test, then descend to children of hit nodes.
+    """
     if bvh is None or origins.size == 0:
         return np.array([], dtype=np.int64)
 
@@ -236,31 +264,57 @@ def _collect_bvh_candidate_triangles(bvh, origins: np.ndarray, directions: np.nd
     tri_refs = bvh["tri_refs"]
     face_count = bvh["face_count"]
 
-    candidate_set = set()
+    origins_f = np.ascontiguousarray(origins, dtype=np.float32)
+    dirs_f = np.ascontiguousarray(directions, dtype=np.float32)
+    safe_dirs = np.where(np.abs(dirs_f) > 1e-9, dirs_f, np.float32(1e-9))
+    inv_dirs = (1.0 / safe_dirs).astype(np.float32)
 
-    for origin, direction in zip(origins, directions):
-        # Avoid division by zero
-        inv_dir = np.where(np.abs(direction) > 1e-9, 1.0 / direction, np.inf)
-        stack = [0]
-        while stack:
-            node_idx = stack.pop()
-            if node_idx < 0:
-                continue
-            if not _ray_aabb_intersects(origin, inv_dir, bbox_min[node_idx], bbox_max[node_idx]):
-                continue
-            tri_indices = tri_refs[node_idx]
-            if tri_indices is not None:
-                candidate_set.update(int(idx) for idx in tri_indices)
-                if len(candidate_set) >= face_count:
+    # Batch-process rays against nodes in chunks to bound memory of the R×N tensor.
+    # Number of nodes is ~2*face_count/leaf_size, typically small.
+    n_rays = origins_f.shape[0]
+    ray_chunk = max(1, min(n_rays, 4096))
+
+    leaf_tri_lists: list = []
+    active = np.array([0], dtype=np.int64)  # start at root
+    visited_leaves = 0
+    while active.size > 0:
+        # Slab-test all rays (chunked) against active nodes
+        node_min = bbox_min[active]
+        node_max = bbox_max[active]
+        any_hit = np.zeros(active.size, dtype=bool)
+        for cs in range(0, n_rays, ray_chunk):
+            ce = min(cs + ray_chunk, n_rays)
+            any_hit |= _batch_ray_aabb_any(origins_f[cs:ce], inv_dirs[cs:ce], node_min, node_max)
+            if any_hit.all():
+                break
+        if not any_hit.any():
+            break
+        hit_nodes = active[any_hit]
+
+        next_nodes: list = []
+        for node_idx in hit_nodes:
+            tris = tri_refs[node_idx]
+            if tris is not None:
+                leaf_tri_lists.append(tris)
+                visited_leaves += tris.size
+                if visited_leaves >= face_count:
                     return np.arange(face_count, dtype=np.int64)
             else:
-                stack.append(left[node_idx])
-                stack.append(right[node_idx])
+                l = left[node_idx]
+                r = right[node_idx]
+                if l >= 0:
+                    next_nodes.append(l)
+                if r >= 0:
+                    next_nodes.append(r)
+        if not next_nodes:
+            break
+        active = np.array(next_nodes, dtype=np.int64)
 
-    if not candidate_set:
+    if not leaf_tri_lists:
         return np.array([], dtype=np.int64)
 
-    return np.array(sorted(candidate_set), dtype=np.int64)
+    combined = np.concatenate(leaf_tri_lists)
+    return np.unique(combined).astype(np.int64, copy=False)
 
 
 def get_available_devices():
@@ -501,6 +555,36 @@ def reflect_ray(incident_direction, normal):
     return reflected / np.linalg.norm(reflected)
 
 
+def _snell_batch(incident: np.ndarray, normal: np.ndarray, ior: float) -> np.ndarray:
+    """Vectorized Snell's law over [N, 3] arrays. Mirrors snell_fn() semantics.
+
+    - normals point outward (as built from face winding)
+    - if cos(incident, normal) < 0: entering medium (n1=1, n2=ior)
+    - else: exiting medium (n1=ior, n2=1)
+    - on TIR (sqrt_term < 1e-6) returns the reflected direction (matches original)
+    """
+    incident = incident / (np.linalg.norm(incident, axis=1, keepdims=True) + 1e-12)
+    normal = normal / (np.linalg.norm(normal, axis=1, keepdims=True) + 1e-12)
+
+    cos_theta = np.einsum('ij,ij->i', incident, normal)  # [N]
+    entering = cos_theta < 0.0
+    ior_ratio = np.where(entering, 1.0 / ior, ior / 1.0)  # [N]
+    snell_normal = np.where(entering[:, None], normal, -normal)  # [N, 3]
+
+    c = -np.einsum('ij,ij->i', incident, snell_normal)  # [N]
+    sqrt_term = 1.0 - (ior_ratio ** 2) * (1.0 - c ** 2)
+    tir = sqrt_term < 1e-6
+
+    # Refracted direction
+    refr_scalar = (ior_ratio * c - np.sqrt(np.clip(sqrt_term, 0.0, None)))  # [N]
+    refracted = ior_ratio[:, None] * incident + refr_scalar[:, None] * snell_normal
+    # TIR fallback: incident + 2*c*snell_normal
+    tir_dir = incident + 2.0 * c[:, None] * snell_normal
+    out = np.where(tir[:, None], tir_dir, refracted)
+    out = out / (np.linalg.norm(out, axis=1, keepdims=True) + 1e-12)
+    return out
+
+
 def cast_rays(fg_mesh, bg_mesh, ray_origins, ray_directions, ior=1.5, return_ray_info=False, return_fg_rays=False, return_reflections=False):
     """Cast rays that refract through fg_mesh (glass, ior=1.5) and then intersect bg_mesh.
 
@@ -510,7 +594,8 @@ def cast_rays(fg_mesh, bg_mesh, ray_origins, ray_directions, ior=1.5, return_ray
     If return_fg_rays=True, also returns a set of ray indices that hit fg_mesh.
     If return_reflections=True, also returns reflection directions and Fresnel coefficients at first hit.
 
-    CUDA-accelerated version using ray_mesh_intersection_torch for mesh intersections.
+    Vectorized: rays that hit fg_mesh are bounced through it in batched ray-mesh passes
+    (one batched call per bounce iteration), instead of one Python loop per ray.
     """
     # Flatten rays if needed
     if ray_directions.ndim == 3:
@@ -526,21 +611,19 @@ def cast_rays(fg_mesh, bg_mesh, ray_origins, ray_directions, ior=1.5, return_ray
     bg_all_locations = []
     bg_all_index_ray = []
     bg_all_index_tri = []
-    exit_directions = []  # Store exit ray directions (after refraction)
-    ray_tracing_info = []  # Store ray tracing info for visualization
+    ray_tracing_info = []  # Vectorized path does not populate this
     all_fg_ray_indices = set()  # Track all rays that hit fg_mesh (global indices)
-    
+
     # Storage for reflection data at first hit
     reflection_directions = {}  # Maps global ray index to reflection direction
     fresnel_coefficients = {}  # Maps global ray index to Fresnel coefficient R
 
     # Get CUDA devices
     devices = get_available_devices()
-    
+
     # Get fg_mesh face normals (pre-compute for efficiency)
     fg_vertices = np.array(fg_mesh.vertices, dtype=np.float32)
     fg_faces = np.array(fg_mesh.faces, dtype=np.int64)
-    # Compute face normals
     v0 = fg_vertices[fg_faces[:, 0]]
     v1 = fg_vertices[fg_faces[:, 1]]
     v2 = fg_vertices[fg_faces[:, 2]]
@@ -549,7 +632,6 @@ def cast_rays(fg_mesh, bg_mesh, ray_origins, ray_directions, ior=1.5, return_ray
     fg_face_normals = np.cross(edge1, edge2)
     fg_face_normals = fg_face_normals / (np.linalg.norm(fg_face_normals, axis=1, keepdims=True) + 1e-8)
 
-    # For progress display similar to no_refraction batching
     batch_size = BATCH_SIZE
     print(f"Processing rays in batches of {batch_size}")
 
@@ -561,219 +643,146 @@ def cast_rays(fg_mesh, bg_mesh, ray_origins, ray_directions, ior=1.5, return_ray
         bar = '█' * filled_length + '-' * (bar_length - filled_length)
         print(f"\rProgress: |{bar}| {progress:.1f}% ({batch_start}/{total_rays})", end="", flush=True)
 
-        batch_origins = origins_for_cast[batch_start:batch_end]
-        batch_directions = dirs_for_cast[batch_start:batch_end]
+        batch_origins = np.asarray(origins_for_cast[batch_start:batch_end], dtype=np.float32)
+        batch_directions = np.asarray(dirs_for_cast[batch_start:batch_end], dtype=np.float32)
+        batch_n = batch_origins.shape[0]
 
-        # Step 1: Batch intersect with fg_mesh (CUDA-accelerated)
+        # Step 1: Batch intersect with fg_mesh (CUDA-accelerated, one hit per ray = nearest)
         fg_locs_all, fg_idx_ray_all, fg_idx_tri_all = ray_mesh_intersection_torch(
             fg_mesh, batch_origins, batch_directions, devices
         )
 
-        # Track which rays hit fg_mesh
-        rays_hit_fg = set(fg_idx_ray_all) if len(fg_locs_all) > 0 else set()
-        rays_miss_fg = set(range(len(batch_origins))) - rays_hit_fg
-        
-        # Track global indices of rays that hit fg_mesh
-        if return_fg_rays and len(rays_hit_fg) > 0:
-            global_fg_indices = {ray_idx + batch_start for ray_idx in rays_hit_fg}
-            all_fg_ray_indices.update(global_fg_indices)
+        # Boolean mask of which rays (within this batch) hit fg
+        hit_fg_mask = np.zeros(batch_n, dtype=bool)
+        # Per-batch-ray entry data (only valid where hit_fg_mask is True)
+        entry_loc = np.zeros((batch_n, 3), dtype=np.float32)
+        entry_tri = np.full(batch_n, -1, dtype=np.int64)
+        if len(fg_locs_all) > 0:
+            idx = np.asarray(fg_idx_ray_all, dtype=np.int64)
+            hit_fg_mask[idx] = True
+            entry_loc[idx] = np.asarray(fg_locs_all, dtype=np.float32)
+            entry_tri[idx] = np.asarray(fg_idx_tri_all, dtype=np.int64)
 
-        # Process rays that missed fg_mesh (cast directly to bg_mesh, CUDA-accelerated)
-        if len(rays_miss_fg) > 0:
-            miss_indices = np.array(list(rays_miss_fg), dtype=np.int32)
-            miss_origins = batch_origins[miss_indices]
-            miss_directions = batch_directions[miss_indices]
-            
+        # Track global indices of rays that hit fg_mesh
+        if return_fg_rays and hit_fg_mask.any():
+            hit_local = np.where(hit_fg_mask)[0]
+            all_fg_ray_indices.update((hit_local + batch_start).tolist())
+
+        # --- Rays that missed fg_mesh: direct cast to bg_mesh ---
+        miss_local = np.where(~hit_fg_mask)[0]
+        if miss_local.size > 0:
+            miss_origins = batch_origins[miss_local]
+            miss_directions = batch_directions[miss_local]
             bg_locs_direct, bg_rays_direct, bg_tris_direct = ray_mesh_intersection_torch(
                 bg_mesh, miss_origins, miss_directions, devices
             )
-            
             if len(bg_locs_direct) > 0:
-                # Map back to original batch indices
-                bg_rays_direct_original = miss_indices[bg_rays_direct] + batch_start
-                
-                bg_all_locations.append(bg_locs_direct)
-                # Extend with individual integers, not array
-                bg_all_index_ray.extend(bg_rays_direct_original.tolist())
-                bg_all_index_tri.extend(bg_tris_direct.tolist())
-                # For rays that don't hit fg_mesh, exit direction is same as initial direction
-                for i in range(len(bg_locs_direct)):
-                    exit_directions.append(miss_directions[bg_rays_direct[i]].copy())
+                bg_rays_direct_global = miss_local[np.asarray(bg_rays_direct, dtype=np.int64)] + batch_start
+                bg_all_locations.append(np.asarray(bg_locs_direct, dtype=np.float32))
+                bg_all_index_ray.extend(bg_rays_direct_global.tolist())
+                bg_all_index_tri.extend(np.asarray(bg_tris_direct, dtype=np.int64).tolist())
 
-        # Process rays that hit fg_mesh (with refraction)
-        if len(fg_locs_all) > 0:
-            # Group intersections by ray index
-            ray_to_hits = {}
-            for i, ray_idx in enumerate(fg_idx_ray_all):
-                if ray_idx not in ray_to_hits:
-                    ray_to_hits[ray_idx] = []
-                ray_to_hits[ray_idx].append((fg_locs_all[i], fg_idx_tri_all[i], i))
-            
-            # Process each ray that hit fg_mesh
-            for ray_idx in ray_to_hits:
-                global_ray_idx = ray_idx + batch_start
-                initial_origin = batch_origins[ray_idx]
-                initial_direction = batch_directions[ray_idx]
-                
-                # Get all hits for this ray and choose nearest as entry
-                hits = ray_to_hits[ray_idx]
-                dists = [np.linalg.norm(loc - initial_origin) for loc, _, _ in hits]
-                first_idx = int(np.argmin(dists))
-                current_location, current_tri_idx, _ = hits[first_idx]
-                current_normal = fg_face_normals[current_tri_idx].copy()  # Normal points outward
-                current_direction = initial_direction.copy()
+        # --- Rays that hit fg_mesh: vectorized refraction ---
+        if hit_fg_mask.any():
+            active_local = np.where(hit_fg_mask)[0]  # local batch indices, all currently refracting
+            initial_dirs = batch_directions[active_local]
+            entry_locs = entry_loc[active_local]
+            entry_tris = entry_tri[active_local]
+            entry_normals = fg_face_normals[entry_tris]  # outward
 
-                # Calculate reflection at first hit
-                # Determine if we need to flip the normal (it should point toward the incident ray)
-                cos_theta_i = np.dot(initial_direction, current_normal)
-                if cos_theta_i > 0:
-                    # Normal points same direction as ray, flip it to point toward incident
-                    reflection_normal = -current_normal
-                else:
-                    # Normal points opposite to ray (correct orientation)
-                    reflection_normal = current_normal
-                
-                # Calculate reflected ray direction
-                reflected_dir = reflect_ray(initial_direction, reflection_normal)
-                reflection_directions[global_ray_idx] = reflected_dir
-                
-                # Calculate Fresnel reflection coefficient (entering glass from air)
-                # n1 = 1.0 (air), n2 = ior (glass)
-                fresnel_R = fresnel_reflectance(cos_theta_i, 1.0, ior)
-                fresnel_coefficients[global_ray_idx] = fresnel_R
+            # Reflection direction & Fresnel at first hit (vectorized)
+            cos_theta_i = np.einsum('ij,ij->i', initial_dirs, entry_normals)  # [A]
+            refl_normal = np.where(cos_theta_i[:, None] > 0.0, -entry_normals, entry_normals)
+            dot_dn = np.einsum('ij,ij->i', initial_dirs, refl_normal)
+            reflected_dirs = initial_dirs - 2.0 * dot_dn[:, None] * refl_normal
+            reflected_dirs = reflected_dirs / (np.linalg.norm(reflected_dirs, axis=1, keepdims=True) + 1e-12)
+            R0 = ((1.0 - ior) / (1.0 + ior)) ** 2
+            fresnel_R = R0 + (1.0 - R0) * ((1.0 - np.abs(cos_theta_i)) ** 5)
+            global_active = active_local + batch_start
+            for k, g in enumerate(global_active):
+                reflection_directions[int(g)] = reflected_dirs[k].copy()
+                fresnel_coefficients[int(g)] = float(fresnel_R[k])
 
-                # Store ray tracing info for visualization
-                all_hits = [current_location.copy()]
-                all_directions = [current_direction.copy()]
-                all_refracted_directions = []
+            # Bounce iteration state
+            current_location = entry_locs.copy()
+            current_direction = initial_dirs.copy()
+            current_normal = entry_normals.copy()
+            # `alive` marks rays still bouncing inside fg_mesh
+            alive = np.ones(active_local.size, dtype=bool)
+            # `final_hit` / `final_dir` store exit ray data for rays that have exited
+            final_hit = np.zeros_like(current_location)
+            final_dir = np.zeros_like(current_direction)
+            exited = np.zeros(active_local.size, dtype=bool)
 
-                # Iterate refractions inside fg mesh until exit
-                max_iterations = 12  # Increased to allow more refractions
-                iteration = 0
-                final_hit = None
-                final_direction = None
-                last_normal = current_normal.copy()  # Initialize with first intersection normal
-                last_tri_idx = current_tri_idx  # Initialize with first intersection triangle
-                
-                while iteration < max_iterations:
-                    iteration += 1
+            max_iterations = 12
+            offset_distance = np.float32(0.01)
+            for _ in range(max_iterations):
+                if not alive.any():
+                    break
+                alive_idx = np.where(alive)[0]
+                new_direction = _snell_batch(current_direction[alive_idx],
+                                             current_normal[alive_idx], ior).astype(np.float32)
+                ray_origin_offset = (current_location[alive_idx] + new_direction * offset_distance).astype(np.float32)
 
-                    # Just do path tracing: pass incident direction and normal to snell_fn
-                    # snell_fn will check the cos and determine entering/exiting internally
-                    new_direction = snell_fn(current_direction, current_normal, ior)
-                    all_refracted_directions.append(new_direction.copy())
-
-                    # Small offset to avoid self-intersections with the current surface
-                    # Balance between avoiding self-intersection and not missing nearby surfaces
-                    offset_distance = 0.01  # Small offset to avoid hitting the same triangle
-                    ray_origin_offset = current_location + new_direction * offset_distance
-
-                    # CUDA-accelerated intersection to find next surface
-                    # Cast from the offset point to avoid self-intersection
-                    next_locs, next_idx_ray, next_idx_tri = ray_mesh_intersection_torch(
-                        fg_mesh, ray_origin_offset.reshape(1, 3), new_direction.reshape(1, 3), devices
-                    )
-
-                    # Debug: print the number of intersections found and the current refraction iteration
-
-                    if len(next_locs) == 0:
-                        # We exited the glass object - no more intersections with fg_mesh
-                        final_hit = ray_origin_offset.copy()
-                        final_direction = new_direction
-                        break
-                    
-                    # Choose nearest intersection (from offset point)
-                    next_dists = [np.linalg.norm(loc - ray_origin_offset) for loc in next_locs]
-                    min_next = int(np.argmin(next_dists))
-
-                    # Continue inside glass - found another intersection
-                    # Update to the new intersection point for next iteration
-                    current_location = next_locs[min_next]
-                    current_tri_idx = int(next_idx_tri[min_next])
-                    current_normal = fg_face_normals[current_tri_idx].copy()  # Normal points outward
-                    current_direction = new_direction.copy()
-                    
-                    # Store last normal and triangle for exit point computation
-                    last_normal = current_normal.copy()
-                    last_tri_idx = current_tri_idx
-                    
-                    # Store this intersection point and direction for visualization
-                    all_hits.append(current_location.copy())
-                    all_directions.append(current_direction.copy())
-                    
-                    # Loop will continue to next iteration to refract at this new surface
-
-                if final_hit is None or final_direction is None:
-                    # Did not get a valid exit; skip
-                    continue
-
-                # Compute actual exit intersection point on mesh surface
-                # The last intersection point in all_hits is the last surface we hit before exiting
-                # Cast from that point (with small offset inside) in the exit direction to find exit point
-                if len(all_hits) > 0:
-                    last_intersection = all_hits[-1]
-                    # Get the normal at the last intersection to offset backwards (into the mesh)
-                    # last_normal should be set, but use fallback just in case
-                    if last_normal is None:
-                        # Fallback: use the normal from the last triangle
-                        last_normal = fg_face_normals[last_tri_idx].copy() if last_tri_idx is not None else fg_face_normals[current_tri_idx].copy()
-                    # Offset backwards along the normal to ensure we start from inside
-                    exit_ray_origin = last_intersection - last_normal * 0.01
-                    
-                    # Find exit intersection
-                    exit_locs, exit_idx_ray, exit_idx_tri = ray_mesh_intersection_torch(
-                        fg_mesh, exit_ray_origin.reshape(1, 3), final_direction.reshape(1, 3), devices
-                    )
-                    
-                    if len(exit_locs) > 0:
-                        # Found exit intersection, use it
-                        exit_dists = [np.linalg.norm(loc - exit_ray_origin) for loc in exit_locs]
-                        exit_min_idx = int(np.argmin(exit_dists))
-                        actual_exit_point = exit_locs[exit_min_idx]
-                        # Store the actual exit intersection point
-                        all_hits.append(actual_exit_point.copy())
-                        all_directions.append(final_direction.copy())
-                        final_hit = actual_exit_point.copy()
-                    else:
-                        # No exit intersection found, use the offset point for ray casting
-                        # But don't store it as a "real" intersection - use last intersection as exit
-                        all_hits.append(last_intersection.copy())  # Use last intersection as exit point
-                        all_directions.append(final_direction.copy())
-                        final_hit = final_hit  # Keep the offset point for ray casting
-                else:
-                    # No intersections stored, use the offset point
-                    all_hits.append(final_hit.copy())
-                    all_directions.append(final_direction.copy())
-
-                # Intersect background mesh from exit point
-                # Apply a small backward offset along the outgoing ray to avoid self-overlap with FG
-                bg_offset = 0.1
-                final_hit_for_bg = final_hit - final_direction * bg_offset
-                bg_locs, bg_idx_ray, bg_idx_tri = ray_mesh_intersection_torch(
-                    bg_mesh, final_hit_for_bg.reshape(1, 3), final_direction.reshape(1, 3), devices
+                # One batched ray cast for ALL alive rays
+                next_locs, next_idx_ray, next_idx_tri = ray_mesh_intersection_torch(
+                    fg_mesh, ray_origin_offset, new_direction, devices
                 )
-                if len(bg_locs) == 0:
-                    continue
+                # next_idx_ray is local to alive_idx. Build full result over alive set.
+                hit_in_alive = np.zeros(alive_idx.size, dtype=bool)
+                if len(next_locs) > 0:
+                    nir = np.asarray(next_idx_ray, dtype=np.int64)
+                    hit_in_alive[nir] = True
+                    new_loc_for_hit = np.asarray(next_locs, dtype=np.float32)
+                    new_tri_for_hit = np.asarray(next_idx_tri, dtype=np.int64)
 
-                # Take the closest BG intersection
-                bg_dists = [np.linalg.norm(loc - final_hit) for loc in bg_locs]
-                bg_min_idx = int(np.argmin(bg_dists))
-                bg_hit = bg_locs[bg_min_idx]
+                # Rays that found no next intersection -> exited
+                miss_in_alive = ~hit_in_alive
+                if miss_in_alive.any():
+                    exit_local = alive_idx[miss_in_alive]
+                    final_hit[exit_local] = ray_origin_offset[miss_in_alive]
+                    final_dir[exit_local] = new_direction[miss_in_alive]
+                    exited[exit_local] = True
+                    alive[exit_local] = False
 
-                bg_all_locations.append(bg_hit)
-                bg_all_index_ray.append(global_ray_idx)
-                bg_all_index_tri.append(int(bg_idx_tri[bg_min_idx]))
-                # Store exit direction (after refraction)
-                exit_directions.append(final_direction.copy())
-                
-                # Store ray tracing info
-                ray_tracing_info.append({
-                    'ray_idx': global_ray_idx,
-                    'all_hits': all_hits,
-                    'all_directions': all_directions,
-                    'all_refracted_directions': all_refracted_directions,
-                    'bg_hit': bg_hit
-                })
+                # Rays that hit another fg surface -> continue bouncing
+                if hit_in_alive.any():
+                    cont_in_alive_idx = np.where(hit_in_alive)[0]
+                    cont_local = alive_idx[cont_in_alive_idx]
+                    # Map back new_loc/new_tri rows (indexed by nir order) to cont positions
+                    # Since hit_in_alive[nir] = True, we can index `new_loc_for_hit` by the
+                    # position within nir corresponding to each cont entry. The easiest mapping:
+                    # build a per-alive lookup using `nir`.
+                    per_alive_loc = np.zeros((alive_idx.size, 3), dtype=np.float32)
+                    per_alive_tri = np.full(alive_idx.size, -1, dtype=np.int64)
+                    per_alive_loc[nir] = new_loc_for_hit
+                    per_alive_tri[nir] = new_tri_for_hit
+                    current_location[cont_local] = per_alive_loc[cont_in_alive_idx]
+                    current_direction[cont_local] = new_direction[cont_in_alive_idx]
+                    current_normal[cont_local] = fg_face_normals[per_alive_tri[cont_in_alive_idx]]
+
+            # Any still-alive rays exhausted iterations without exiting -> drop them
+            # (matches original: `if final_hit is None: continue`)
+            if not exited.any():
+                # No fg-refracted ray exited; nothing to add for fg path
+                pass
+            else:
+                ex_local = np.where(exited)[0]
+                fh = final_hit[ex_local]
+                fd = final_dir[ex_local]
+                bg_offset = np.float32(0.1)
+                final_hit_for_bg = (fh - fd * bg_offset).astype(np.float32)
+
+                bg_locs, bg_idx_ray, bg_idx_tri = ray_mesh_intersection_torch(
+                    bg_mesh, final_hit_for_bg, fd.astype(np.float32), devices
+                )
+                if len(bg_locs) > 0:
+                    bir = np.asarray(bg_idx_ray, dtype=np.int64)
+                    # bir indexes into ex_local; map to active_local, then to global
+                    refracted_global = active_local[ex_local[bir]] + batch_start
+                    bg_all_locations.append(np.asarray(bg_locs, dtype=np.float32))
+                    bg_all_index_ray.extend(refracted_global.tolist())
+                    bg_all_index_tri.extend(np.asarray(bg_idx_tri, dtype=np.int64).tolist())
 
     # Final progress completion
     bar = '█' * 50
@@ -867,208 +876,6 @@ def cast_rays_no_refraction(mesh, ray_origins, ray_directions):
         return locations, index_ray, index_tri
     else:
         return np.array([]), np.array([]), np.array([])
-
-
-def create_3d_visualization(mesh, bg_mesh, ray_origins, ray_directions, ray_tracing_info, output_html="ray_visualization.html"):
-    """
-    Create an interactive 3D visualization using the ray tracing information from cast_rays function.
-    Shows the complete ray path for each pixel with proper refraction.
-    
-    Note: Meshes are already in Blender coordinate system (y=forward, x=right, z=up).
-    We keep them in Blender coordinates for visualization to match the ray directions.
-    """
-    # Use meshes as-is (already in Blender coordinate system)
-    transformed_mesh = mesh
-    transformed_bg_mesh = bg_mesh
-
-    # Create plotly figure
-    fig = go.Figure()
-
-    # Add glass mesh
-    glass_vertices = transformed_mesh.vertices
-    glass_faces = transformed_mesh.faces
-    fig.add_trace(go.Mesh3d(
-        x=glass_vertices[:, 0],
-        y=glass_vertices[:, 1], 
-        z=glass_vertices[:, 2],
-        i=glass_faces[:, 0],
-        j=glass_faces[:, 1],
-        k=glass_faces[:, 2],
-        opacity=0.3,
-        color='lightgreen',
-        name='Glass Mesh'
-    ))
-
-    # Add background mesh
-    bg_vertices = transformed_bg_mesh.vertices
-    bg_faces = transformed_bg_mesh.faces
-    fig.add_trace(go.Mesh3d(
-        x=bg_vertices[:, 0],
-        y=bg_vertices[:, 1],
-        z=bg_vertices[:, 2], 
-        i=bg_faces[:, 0],
-        j=bg_faces[:, 1],
-        k=bg_faces[:, 2],
-        opacity=0.2,
-        color='lightcoral',
-        name='Background Mesh'
-    ))
-
-    # Create simple camera dot
-    # ray_origins are in Blender coordinates (y=forward, x=right, z=up)
-    camera_pos = ray_origins[0] if ray_origins.ndim == 2 else ray_origins.flatten().reshape(-1, 3)[0]
-
-    # Add simple camera dot (Blender coordinates: x=right, y=forward, z=up)
-    fig.add_trace(go.Scatter3d(
-        x=[camera_pos[0]],  # x = right
-        y=[camera_pos[1]],  # y = forward
-        z=[camera_pos[2]],  # z = up
-        mode='markers',
-        marker=dict(size=8, color='blue'),
-        name='Camera'
-    ))
-
-    # Process ray tracing information to visualize the complete ray paths
-    if ray_tracing_info and len(ray_tracing_info) > 0:
-        # Sample up to 10 rays (evenly spaced) to avoid clutter
-        num_to_show = min(10, len(ray_tracing_info))
-        sampled_indices = np.linspace(0, len(ray_tracing_info) - 1, num_to_show, dtype=int)
-        sampled_rays = [ray_tracing_info[i] for i in sampled_indices]
-        for ray_data in sampled_rays:
-            ray_idx = ray_data['ray_idx']
-            all_hits = ray_data['all_hits']
-            all_directions = ray_data['all_directions']
-            all_refracted_directions = ray_data['all_refracted_directions']
-            bg_hit = ray_data['bg_hit']
-
-            if len(all_hits) < 2:  # Need at least 2 hits (entry and exit)
-                continue
-
-            # Get ray origin and initial direction (Blender coordinates: x=right, y=forward, z=up)
-            origin = ray_origins[ray_idx] if ray_origins.ndim == 2 else ray_origins.flatten().reshape(-1, 3)[ray_idx]
-            initial_direction = ray_directions[ray_idx] if ray_directions.ndim == 2 else ray_directions.flatten().reshape(-1, 3)[ray_idx]
-
-            # Generate a unique color for this ray based on ray_idx
-            colors = ['red', 'green', 'blue', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
-            ray_color = colors[ray_idx % len(colors)]
-
-            # Segment 1: Camera to Hit 1 (entry point)
-            hit1 = all_hits[0]
-            fig.add_trace(go.Scatter3d(
-                x=[origin[0], hit1[0]],  # x = right
-                y=[origin[1], hit1[1]],  # y = forward
-                z=[origin[2], hit1[2]],  # z = up
-                mode='lines',
-                line=dict(color=ray_color, width=2),
-                name=f'Ray {ray_idx} - Camera to Entry',
-                showlegend=False
-            ))
-
-            # Add entry point marker (same color as ray)
-            fig.add_trace(go.Scatter3d(
-                x=[hit1[0]],
-                y=[hit1[1]],
-                z=[hit1[2]],
-                mode='markers',
-                marker=dict(size=2, color=ray_color),
-                name=f'Entry Point {ray_idx}',
-                showlegend=False
-            ))
-
-            # Draw all ray segments using the stored refracted directions
-            for i in range(len(all_hits) - 1):
-                hit1 = all_hits[i]
-                # Draw ray segment from hit1 to hit2 (actual path)
-                hit2 = all_hits[i+1]
-                fig.add_trace(go.Scatter3d(
-                    x=[hit1[0], hit2[0]],  # x = right
-                    y=[hit1[1], hit2[1]],  # y = forward
-                    z=[hit1[2], hit2[2]],  # z = up
-                    mode='lines',
-                    line=dict(color=ray_color, width=2),
-                    name=f'Ray {ray_idx} - Segment {i+1}',
-                    showlegend=False
-                ))
-
-                # Add hit point marker (same color as ray)
-                actual_next_hit = all_hits[i+1]
-                fig.add_trace(go.Scatter3d(
-                    x=[actual_next_hit[0]],
-                    y=[actual_next_hit[1]],
-                    z=[actual_next_hit[2]],
-                    mode='markers',
-                    marker=dict(size=2, color=ray_color),
-                    name=f'Hit {i+2} Point {ray_idx}',
-                    showlegend=False
-                ))
-
-            # Draw final ray to background if we have a background hit
-            if bg_hit is not None:
-                final_hit = all_hits[-1]
-
-                # Draw the final ray to background
-                fig.add_trace(go.Scatter3d(
-                    x=[final_hit[0], bg_hit[0]],  # x = right
-                    y=[final_hit[1], bg_hit[1]],  # y = forward
-                    z=[final_hit[2], bg_hit[2]],  # z = up
-                    mode='lines',
-                    line=dict(color=ray_color, width=2),
-                    name=f'Ray {ray_idx} - To Background',
-                    showlegend=False
-                ))
-
-                # Add background hit marker (same color as ray)
-                fig.add_trace(go.Scatter3d(
-                    x=[bg_hit[0]],
-                    y=[bg_hit[1]],
-                    z=[bg_hit[2]],
-                    mode='markers',
-                    marker=dict(size=2, color=ray_color),
-                    name=f'BG Hit {ray_idx}',
-                    showlegend=False
-                ))
-            else:
-                # If no BG hit, just extend the final ray
-                final_hit = all_hits[-1]
-                final_direction = all_refracted_directions[-1] if len(all_refracted_directions) > 0 else all_directions[-1]
-                final_length = 2.0
-                final_end = final_hit + final_direction * final_length
-
-                fig.add_trace(go.Scatter3d(
-                    x=[final_hit[0], final_end[0]],  # x = right
-                    y=[final_hit[1], final_end[1]],  # y = forward
-                    z=[final_hit[2], final_end[2]],  # z = up
-                    mode='lines',
-                    line=dict(color=ray_color, width=2),
-                    name=f'Ray {ray_idx} - Final Exit',
-                    showlegend=False
-                ))
-
-
-
-
-
-
-
-    # Update layout
-    fig.update_layout(
-        title='Ray Tracing: Complete Paths (Different Colors per Pixel)',
-        scene=dict(
-            xaxis_title='X',
-            yaxis_title='Y',
-            zaxis_title='Z',
-            aspectmode='data'
-        ),
-        width=1600,
-        height=1200
-    )
-
-    # Save as interactive HTML
-    pyo.plot(fig, filename=output_html, auto_open=False)
-
-
-
-    print(f"\nInteractive 3D visualization saved to: {output_html}")
 
 
 def main():
