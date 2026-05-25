@@ -85,7 +85,7 @@ def generate_variation(pipe, image_path: str, seed: int, prompt: str, negative_p
 
 def build_prompts(obj: str) -> tuple[str, str]:
     prompt = (
-        f"Add a dim and soft shadow beneath the transparent {obj}, and subtle specular "
+        f"Add a realistic shadow under the transparent {obj} with caustics, and subtle specular "
         f"highlights on the transparent surface to enhance shine, but do not change the "
         f"existing pattern at all. Remove background artifacts and noise."
     )
