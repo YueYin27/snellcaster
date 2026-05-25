@@ -42,8 +42,6 @@ from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.flux.pipeline_output import FluxPipelineOutput
 
-# Import the original pipeline for inheritance
-from pipeline_snellcaster_flux import SnellcasterPipeline_Flux, calculate_shift, retrieve_timesteps
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm

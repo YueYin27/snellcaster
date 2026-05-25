@@ -202,6 +202,8 @@ def parse_args():
                        help='Path to foreground mask (default: None)')
     parser.add_argument('--intermediate_vis', action='store_true',
                        help='Enable intermediate visualization (default: False)')
+    parser.add_argument('--save_intermediate', action='store_true',
+                       help='Save per-step Tweedie estimates and final grid (default: False)')
     return parser.parse_args()
 
 # Create separate schedulers for main and panorama images
@@ -257,9 +259,9 @@ main_clean, fg_mask, fresnel_map, uv_maps, self_warped_main_clean_image, self_wa
 denoising_callback = lambda pipeline, step, timestep, main_h, main_w, pano_h, pano_w, main_tweedie, pano_tweedie: dual_tweedie_callback(
     pipeline, step, timestep, main_h, main_w, pano_h, pano_w, base_output_dir, main_tweedie, pano_tweedie,
     save_dir=os.path.join(base_output_dir, "tweedie_estimates"),
-    store_estimates=False,
-    save_single_immediately=False,
-    save_grid_at_end=False,
+    store_estimates=args.save_intermediate,
+    save_single_immediately=args.save_intermediate,
+    save_grid_at_end=args.save_intermediate,
     total_steps=args.num_steps,
     warpings_dir=args.warpings_dir,
     alpha=args.alpha,

@@ -35,6 +35,7 @@ def main() -> None:
 	parser.add_argument("--pano_seed", type=int, default=42, help="Seed for panorama generation in dual view (default: 42)")
 	parser.add_argument("--num_shadow_variations", type=int, default=3, help="Number of shadow variations to generate (default: 3)")
 	parser.add_argument("--obj_mesh", type=str, default=None, help="Path to an existing foreground object mesh (.glb). If provided, skips step 4 (text-to-3D generation) and uses this mesh directly.")
+	parser.add_argument("--save_intermediate", action="store_true", help="Save per-step Tweedie estimates and final grid during dual-view generation")
 	args = parser.parse_args()
 	prompt = args.prompt
 	height = args.height
@@ -98,17 +99,17 @@ def main() -> None:
 	# Step 2: Generate base image from p_minus.
 	if not (out_dir / f"{scene_name}_{seed}.jpg").exists():
 		print("\n[Step 2] Generating base image with FluxPipeline...")
-		base_image_path = out_dir / f"{scene_name}_{seed}.jpg"
+		image_path = out_dir / f"{scene_name}_{seed}.jpg"
 		base_img, seed = generate_base_image(
 			p_minus,
 			width=width,
 			height=height,
 			seed=seed,
-			save_path=str(base_image_path),
+			save_path=str(image_path),
 		)
 	else:
 		print(f"Base image already exists at {out_dir / f'{scene_name}_{seed}.jpg'}, skipping generation.")
-		base_image_path = out_dir / f"{scene_name}_{seed}.jpg"
+		image_path = out_dir / f"{scene_name}_{seed}.jpg"
 
 
 	# Step 3: Run MoGe2 with maps+glb and threshold=0.1.
@@ -138,7 +139,6 @@ def main() -> None:
 
 	mesh_bg_path = scene_dir / "mesh.glb"
 	camera_json_path = scene_dir / "camera.json"
-	image_path = scene_dir / "image.jpg"
 
 
 	# Step 4: Text to 3D mesh
@@ -179,8 +179,16 @@ def main() -> None:
 
 	# Step 6: Render foreground mask from the updated mesh_fg.glb.
 	print("\n[Step 6] Rendering foreground mask...")
-	mask_fg_path = scene_dir / "mask_fg.jpg"
-	if not mask_fg_path.exists():
+	mask_fg_jpg = scene_dir / "mask_fg.jpg"
+	mask_fg_png = scene_dir / "mask_fg.png"
+	if mask_fg_jpg.exists():
+		mask_fg_path = mask_fg_jpg
+		print(f"Foreground mask already exists at {mask_fg_path}, skipping mask rendering.")
+	elif mask_fg_png.exists():
+		mask_fg_path = mask_fg_png
+		print(f"Foreground mask already exists at {mask_fg_path}, skipping mask rendering.")
+	else:
+		mask_fg_path = mask_fg_jpg
 		run_cmd(
 			[
 				sys.executable,
@@ -194,8 +202,6 @@ def main() -> None:
 			],
 			cwd=script_dir,
 		)
-	else:
-		print(f"Foreground mask already exists at {mask_fg_path}, skipping mask rendering.")
 
 
 	# Step 7: Run warping.
@@ -234,41 +240,41 @@ def main() -> None:
 	# Step 8: Run dual-view generation.
 	print("\n[Step 8] Running dual-view generation...")
 	if not ((scene_dir / "main_no_shadow.jpg").exists() and (scene_dir / "pano.jpg").exists()):
-		run_cmd(
-			[
-				sys.executable,
-				"generate_dual_view.py",
-				"--main_prompt",
-				prompt,
-				"--pano_prompt",
-				p_pano,
-				"--main_clean_path",
-				str(image_path),
-				"--fg_mask_path",
-				str(mask_fg_path),
-				"--warpings_dir",
-				str(scene_dir / "warpings"),
-				"--output_dir",
-				str(scene_dir),
-				"--alpha",
-				str(alpha),
-				"--levels",
-				str(levels),
-				"--time_travel_repeats",
-				str(time_travel_repeats),
-				"--blend_step_ratio",
-				str(blend_step_ratio),
-				"--num_steps",
-				str(num_steps),
-				"--main_guidance_scale",
-				str(main_guidance_scale),
-				"--pano_guidance_scale",
-				str(pano_guidance_scale),
-				"--pano_seed",
-				str(pano_seed),
-			],
-			cwd=script_dir,
-		)
+		dual_view_cmd = [
+			sys.executable,
+			"generate_dual_view.py",
+			"--main_prompt",
+			prompt,
+			"--pano_prompt",
+			p_pano,
+			"--main_clean_path",
+			str(image_path),
+			"--fg_mask_path",
+			str(mask_fg_path),
+			"--warpings_dir",
+			str(scene_dir / "warpings"),
+			"--output_dir",
+			str(scene_dir),
+			"--alpha",
+			str(alpha),
+			"--levels",
+			str(levels),
+			"--time_travel_repeats",
+			str(time_travel_repeats),
+			"--blend_step_ratio",
+			str(blend_step_ratio),
+			"--num_steps",
+			str(num_steps),
+			"--main_guidance_scale",
+			str(main_guidance_scale),
+			"--pano_guidance_scale",
+			str(pano_guidance_scale),
+			"--pano_seed",
+			str(pano_seed),
+		]
+		if args.save_intermediate:
+			dual_view_cmd.append("--save_intermediate")
+		run_cmd(dual_view_cmd, cwd=script_dir)
 	else:
 		print(f"Dual-view outputs already exist at {scene_dir}, skipping generation.")
 
