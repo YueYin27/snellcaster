@@ -149,7 +149,7 @@ def main() -> None:
 				"--maps",
 				"--glb",
 				"--threshold",
-				"0.1",
+				"0.05",
 			],
 			cwd=script_dir,
 		)
