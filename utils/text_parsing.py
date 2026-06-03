@@ -59,7 +59,7 @@ def parse_prompt(prompt: str, model_id: str = "google/gemma-4-E2B-it", seed: int
     )
 
     p_surface = generate_text(
-        f"Extract exactly one short phrase that names the TOP SURFACE where the transparent object was placed in this description: {p}. The output MUST be a single phrase in one of these formats: top surface of the <supporting-surface>, tabletop of the <supporting-surface>, or surface of the <supporting-surface>. Do NOT output only the object name (e.g. stone table) or any extra words, punctuation, or explanation. Output exactly one phrase and nothing else.",
+        f"Extract exactly one short phrase that names the TOP SURFACE where the transparent object was placed in this description: {p}. The output MUST be a single phrase in one of these formats: top surface of the <supporting-surface>, tabletop of the <supporting-surface>, or surface of the <supporting-surface>. The <supporting-surface> MUST be a SHORT generic noun (1-2 words, e.g. 'table', 'desk', 'counter', 'pedestal', 'shelf') — do NOT include material, color, or stylistic adjectives (e.g. output 'top surface of the table', NOT 'top surface of the wooden tea table'). Do NOT output only the object name (e.g. stone table) or any extra words, punctuation, or explanation. Output exactly one phrase and nothing else.",
     )
 
     p_pano = generate_text(
