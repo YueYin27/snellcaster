@@ -39,6 +39,10 @@ pip install -U xformers --index-url https://download.pytorch.org/whl/cu128
 
 pip install --upgrade pip
 pip install -r requirements.txt
+
+
+# Apply patches to third-party packages
+patch -p1 --forward -d "$(python -c 'import moge, os; print(os.path.dirname(os.path.dirname(moge.__file__)))')" < utils/moge2_infer.patch
 ```
 
 ### 🤖 Inference
@@ -64,4 +68,9 @@ pip install -r requirements.txt
 
 
 ## ⚖️ License
-This project is licensed under the GNU GENERAL PUBLIC LICENSE Version 3. See the [LICENSE](LICENSE) file for details.
+
+This project is licensed under the GNU General Public License v3.0. See the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgements
+
+This project uses [MoGe](https://github.com/microsoft/MoGe) (© Microsoft Corporation, MIT License) for background geometry estimation. Our modifications are provided as a patch in [`utils/moge2_infer.patch`](utils/moge2_infer.patch).
