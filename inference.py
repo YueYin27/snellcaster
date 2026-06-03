@@ -137,11 +137,12 @@ def main() -> None:
 	if not mesh_bg_path.exists() or not camera_json_path.exists():
 		# moge2 writes to <-o>/<image_stem>/, so point it at intermediates_dir
 		# and then flatten the resulting "base_image/" subfolder up one level.
+		# Runs MoGe's patched infer script (see utils/moge2_infer.patch and README).
 		run_cmd(
 			[
 				sys.executable,
 				"-m",
-				"utils.moge2_infer",
+				"moge.scripts.infer",
 				"-i",
 				str(image_path),
 				"-o",

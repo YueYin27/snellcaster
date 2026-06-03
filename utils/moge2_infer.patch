@@ -1,0 +1,18 @@
+# Patch for MoGe (microsoft/MoGe, MIT license, pinned at commit 0744441 in requirements.txt).
+# Adds camera intrinsics to the saved JSON and renames fov.json -> camera.json.
+# Apply from the installed moge package root:  patch -p1 < this.patch   (see README).
+--- a/moge/scripts/infer.py
++++ b/moge/scripts/infer.py
+@@ -115,10 +115,11 @@
+             if normal is not None:
+                 cv2.imwrite(str(save_path / 'normal.png'), cv2.cvtColor(colorize_normal(normal), cv2.COLOR_RGB2BGR))
+             fov_x, fov_y = utils3d.np.intrinsics_to_fov(intrinsics)
+-            with open(save_path / 'fov.json', 'w') as f:
++            with open(save_path / 'camera.json', 'w') as f:
+                 json.dump({
+                     'fov_x': round(float(np.rad2deg(fov_x)), 2),
+                     'fov_y': round(float(np.rad2deg(fov_y)), 2),
++                    'intrinsics': intrinsics.tolist(),
+                 }, f)
+ 
+         # Export mesh & visulization
