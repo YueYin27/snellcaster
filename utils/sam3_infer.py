@@ -1,3 +1,5 @@
+# Model loading and inference calls follow the Basic Usage example from the
+# SAM3 README (facebookresearch/sam3, SAM License).
 import argparse
 import random
 import torch

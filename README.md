@@ -72,3 +72,5 @@ This project is licensed under the GNU General Public License v3.0. See the [LIC
 ## 🙏 Acknowledgements
 
 This project uses [MoGe](https://github.com/microsoft/MoGe) (© Microsoft Corporation, MIT License) for background geometry estimation. Our modifications are provided as a patch in [`utils/moge2_infer.patch`](utils/moge2_infer.patch).
+
+We also use [SAM 3](https://github.com/facebookresearch/sam3) (© Meta Platforms, SAM License) to locate the placement surface for the transparent object.
