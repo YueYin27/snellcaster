@@ -8,10 +8,8 @@ import torch.nn.functional as F
 import trimesh
 from PIL import Image
 import sys
-
-# Import GPU acceleration functions from ray_tracer
-from utils.ray_tracer import get_available_devices, ray_triangle_intersection_torch
-BATCH_SIZE = 64
+from utils.ray_tracer import get_available_devices, ray_mesh_intersection_torch
+BATCH_SIZE = 256
 
 
 def load_camera_params(json_file):
@@ -40,56 +38,27 @@ def create_camera_matrix(intrinsics, width, height):
 
 def ray_mesh_intersection_torch_mask(mesh, ray_origins, ray_directions, devices):
     """GPU-accelerated batch ray-mesh intersection returning boolean hits per ray.
-    Optimized for mask generation - returns only boolean array, not intersection details.
+
+    Thin wrapper over ray_tracer.ray_mesh_intersection_torch, which already applies
+    BVH candidate-triangle culling (so the Moller-Trumbore kernel only sees the few
+    triangles whose bounding boxes a ray could hit, instead of every face), caches
+    the mesh vertices on each device, and splits rays across devices. For mask
+    generation we discard the locations/triangles and keep only which rays hit.
     """
-    vertices = torch.from_numpy(mesh.vertices).float()
-    faces = torch.from_numpy(mesh.faces).long()
-    origins = torch.from_numpy(ray_origins).float()
-    directions = torch.from_numpy(ray_directions).float()
-    
-    total_rays = len(origins)
-    rays_per_device = total_rays // len(devices)
-    all_hits = []
-    
-    for i, device in enumerate(devices):
-        device_start = i * rays_per_device
-        device_end = device_start + rays_per_device if i < len(devices) - 1 else total_rays
-        
-        device_origins = origins[device_start:device_end].to(device)
-        device_directions = directions[device_start:device_end].to(device)
-        device_vertices = vertices.to(device)
-        device_faces = faces.to(device)
-        
-        # Use the imported ray_triangle_intersection_torch from ray_tracer
-        # It returns (intersection_points, valid_rays, valid_triangles)
-        # We only need to know which rays hit something
-        intersection_points, valid_rays, _ = ray_triangle_intersection_torch(
-            device_origins, device_directions, device_vertices, device_faces
-        )
-        
-        # Convert valid_rays indices to boolean array
-        device_hits = torch.zeros(device_end - device_start, dtype=torch.bool, device=device)
-        if len(valid_rays) > 0:
-            device_hits[valid_rays] = True
-        
-        # Synchronize CUDA operations and get result
-        if device.startswith('cuda'):
-            device_idx = int(device.split(':')[1]) if ':' in device else 0
-            torch.cuda.synchronize(device=device_idx)
-        
-        all_hits.append(device_hits.cpu().numpy())
-        
-        # Clear GPU memory after each device to prevent OOM
-        del device_origins, device_directions, device_vertices, device_faces
-        del intersection_points, valid_rays, device_hits
-        if device.startswith('cuda'):
-            torch.cuda.empty_cache()
-    
-    if all_hits:
-        hits_bool = np.concatenate(all_hits)
-        return hits_bool
-    else:
-        return np.zeros(total_rays, dtype=bool)
+    total_rays = len(ray_origins)
+    if total_rays == 0:
+        return np.zeros(0, dtype=bool)
+
+    # ray_mesh_intersection_torch returns (locations, ray_indices, tri_indices).
+    # A ray hit the mesh iff its index appears in ray_indices.
+    _, ray_indices, _ = ray_mesh_intersection_torch(
+        mesh, ray_origins, ray_directions, devices
+    )
+
+    hits_bool = np.zeros(total_rays, dtype=bool)
+    if len(ray_indices) > 0:
+        hits_bool[np.asarray(ray_indices, dtype=np.int64)] = True
+    return hits_bool
 
 
 def render_mask(mesh, width, height, fov_x, fov_y):
@@ -148,33 +117,37 @@ def render_mask(mesh, width, height, fov_x, fov_y):
 	total_rays = len(ray_directions_flat)
 	print(f"Casting {total_rays} rays for mask generation...")
 	
-	# Reduced batch size to avoid OOM errors with high-poly meshes
-	# Memory usage scales as O(batch_size * num_faces)
-	batch_size = BATCH_SIZE  # Conservative batch size to prevent CUDA OOM
+	# Batch the rays; BVH culling inside ray_mesh_intersection_torch limits the
+	# Moller-Trumbore tensor to candidate triangles, so memory no longer scales
+	# with the full face count and a larger batch is safe.
+	batch_size = BATCH_SIZE
 	all_hits = []
 	
 	print(f"Processing rays in batches of {batch_size}")
-	for batch_start in range(0, total_rays, batch_size):
+	num_batches = (total_rays + batch_size - 1) // batch_size
+	last_pct = -1
+	for batch_idx, batch_start in enumerate(range(0, total_rays, batch_size)):
 		batch_end = min(batch_start + batch_size, total_rays)
-		progress = (batch_start / total_rays) * 100
-		bar_length = 50
-		filled_length = int(bar_length * batch_start // total_rays)
-		bar = '█' * filled_length + '-' * (bar_length - filled_length)
-		print(f"\rProgress: |{bar}| {progress:.1f}% ({batch_start}/{total_rays})", end="", flush=True)
-		
 		batch_origins = ray_origins_flat[batch_start:batch_end]
 		batch_directions = ray_directions_flat[batch_start:batch_end]
-		
+
 		try:
 			batch_hits = ray_mesh_intersection_torch_mask(
 				transformed_mesh, batch_origins, batch_directions, devices
 			)
 			all_hits.append(batch_hits)
-			
-			# Clear any remaining GPU memory after each batch
-			if torch.cuda.is_available():
-				torch.cuda.empty_cache()
-				
+
+			pct = int(batch_end * 100 // total_rays)
+			if pct != last_pct:
+				last_pct = pct
+				bar_length = 50
+				filled_length = bar_length * batch_end // total_rays
+				bar = '█' * filled_length + '-' * (bar_length - filled_length)
+				progress_str = (f"Progress: |{bar}| {pct}% "
+								f"({batch_end}/{total_rays}) [Batch {batch_idx+1}/{num_batches}]")
+				# ljust pads shorter lines so they fully overwrite longer earlier ones.
+				print(f"\r{progress_str.ljust(120)}", end="", flush=True)
+
 		except torch.cuda.OutOfMemoryError as e:
 			print(f"\n\n{'='*70}")
 			print(f"FATAL ERROR: CUDA Out of Memory at batch {batch_start}-{batch_end}")
@@ -192,10 +165,10 @@ def render_mask(mesh, width, height, fov_x, fov_y):
 			traceback.print_exc()
 			print(f"{'='*70}\n")
 			sys.exit(1)
-	
-	# Final progress bar
+
 	bar = '█' * 50
-	print(f"\rProgress: |{bar}| 100.0% ({total_rays}/{total_rays}) - Complete!")
+	final_str = f"Progress: |{bar}| 100.0% ({total_rays}/{total_rays}) - Complete!"
+	print(f"\r{final_str.ljust(120)}")
 	
 	# Concatenate all batch results
 	hits_bool = np.concatenate(all_hits)
