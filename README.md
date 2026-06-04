@@ -55,14 +55,12 @@ patch -p1 --forward -d "$(python -c 'import moge, os; print(os.path.dirname(os.p
 ## 📑 Citation
 
 ```bibtex
-@misc{yin2026refractingrealitygeneratingimages,
-      title={Refracting Reality: Generating Images with Realistic Transparent Objects}, 
-      author={Yue Yin and Enze Tao and Dylan Campbell},
-      year={2026},
-      eprint={2511.17340},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2511.17340}, 
+@inproceedings{yin2026refracting,
+  title={Refracting Reality: Generating Images with Realistic Transparent Objects},
+  author={Yin, Yue and Tao, Enze and Campbell, Dylan},
+  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
+  pages={4312--4321},
+  year={2026}
 }
 ```
 
