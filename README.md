@@ -14,9 +14,9 @@
 	<a href="https://yueyin27.github.io/snellcaster-page"><img src="https://img.shields.io/badge/Project-Website-blue?logo=google-chrome&logoColor=white" style="height: 27px; margin: 5px;"></a>
 </p>
 
-<p align="center" style="color: orange; font-style: italic; margin-bottom: 12px;">
+<!-- <p align="center" style="color: orange; font-style: italic; margin-bottom: 12px;">
   ⚠️ This repository is still being updated. Feel free to use it, but keep it up to date.
-</p>
+</p> -->
 
 ## ✨ Overview
 Refracting Reality (CVPR 2026 Highlight) introduces Snellcaster, a generation framework for synthesizing images with transparent objects that obey physically grounded optics. Given a text prompt, Snellcaster synchronizes pixels within the object’s boundary with those outside by warping and merging the pixels using Snell’s Law of Refraction at each step of the generation trajectory. For surfaces that are not directly observed in the image but are visible via refraction or reflection, we recover their appearance by synchronizing the image with a second generated view — a panorama centered at the object — using the same warping and merging procedure.
